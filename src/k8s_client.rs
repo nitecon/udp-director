@@ -92,7 +92,7 @@ impl K8sClient {
 
         // Filter by annotations if provided (client-side filtering)
         if let Some(annotations) = annotation_selector {
-            filtered.retain(|resource| self.matches_annotation_selector(resource, annotations));
+            filtered.retain(|resource| Self::matches_annotation_selector(resource, annotations));
         }
 
         debug!("After filtering: {} resources match", filtered.len());
@@ -131,7 +131,6 @@ impl K8sClient {
 
     /// Check if a resource matches the annotation selector
     fn matches_annotation_selector(
-        &self,
         resource: &DynamicObject,
         selector: &HashMap<String, String>,
     ) -> bool {
@@ -571,11 +570,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn test_annotation_selector_matching() {
-        let client = K8sClient {
-            client: Client::try_default().await.ok().unwrap(),
-        };
+    #[test]
+    fn test_annotation_selector_matching() {
+        // Note: `matches_annotation_selector` is a pure associated function that
+        // operates only on the resource and selector, so this test does not need a
+        // live Kubernetes client (constructing one would fail in CI where no
+        // kubeconfig or in-cluster config is available).
 
         // Create a resource with annotations
         let resource_json = json!({
@@ -599,20 +599,24 @@ mod tests {
         // Test exact match
         let mut selector = HashMap::new();
         selector.insert("currentPlayers".to_string(), "32".to_string());
-        assert!(client.matches_annotation_selector(&resource, &selector));
+        assert!(K8sClient::matches_annotation_selector(&resource, &selector));
 
         // Test multiple annotations match
         selector.insert("map".to_string(), "de_dust2".to_string());
-        assert!(client.matches_annotation_selector(&resource, &selector));
+        assert!(K8sClient::matches_annotation_selector(&resource, &selector));
 
         // Test annotation value mismatch
         selector.insert("currentPlayers".to_string(), "64".to_string());
-        assert!(!client.matches_annotation_selector(&resource, &selector));
+        assert!(!K8sClient::matches_annotation_selector(
+            &resource, &selector
+        ));
 
         // Test missing annotation
         let mut selector2 = HashMap::new();
         selector2.insert("nonExistent".to_string(), "value".to_string());
-        assert!(!client.matches_annotation_selector(&resource, &selector2));
+        assert!(!K8sClient::matches_annotation_selector(
+            &resource, &selector2
+        ));
 
         // Test resource without annotations
         let resource_no_annot = json!({
@@ -623,6 +627,9 @@ mod tests {
             }
         });
         let resource_no_annot: DynamicObject = serde_json::from_value(resource_no_annot).unwrap();
-        assert!(!client.matches_annotation_selector(&resource_no_annot, &selector));
+        assert!(!K8sClient::matches_annotation_selector(
+            &resource_no_annot,
+            &selector
+        ));
     }
 }
