@@ -45,11 +45,12 @@ UDP Director uses a query-based session establishment flow:
    Client → Director: "Find me a game server with map=de_dust2"
    Director → K8s API: Query resources, find matching service
    Director → Client: Return token + establish session immediately
-   Session: Client IP:Port → Target IP:Port mapping created
+   Route: Client IP → Target mapping created
 
 2. CONNECT (TCP/UDP :7777+)
    Client → Director: Connect and send data (no token needed)
    Director: Route based on existing session
+   Director: Isolate each client UDP source port in its own upstream flow
    Client ↔ Target: All traffic proxied (TCP or UDP)
 
 3. RESET (UDP :7777) - Optional

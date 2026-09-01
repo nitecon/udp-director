@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -45,14 +45,13 @@ impl SessionSocket {
         *shutdown = true;
     }
 
-    /// Start a background task to receive packets from target and forward to client
-    /// Now takes client_ip and proxy_port to look up active client ports dynamically
+    /// Start a background task to receive packets from the target and forward
+    /// them to the exact client socket associated with this upstream socket.
     pub fn start_receive_task(
         &self,
-        client_ip: IpAddr,
+        client_addr: SocketAddr,
         proxy_port: u16,
         proxy_socket: Arc<UdpSocket>,
-        session_manager: Arc<SessionManager>,
     ) {
         let socket = self.socket.clone();
         let shutdown = self.shutdown.clone();
@@ -64,7 +63,7 @@ impl SessionSocket {
                 if *shutdown.read().await {
                     debug!(
                         "Receive task shutting down for client {} on port {}",
-                        client_ip, proxy_port
+                        client_addr, proxy_port
                     );
                     break;
                 }
@@ -74,33 +73,19 @@ impl SessionSocket {
                     .await
                 {
                     Ok(Ok((len, target_addr))) => {
-                        // Received packet from target, forward to client
-                        // Get active client ports for this session
-                        if let Some(session) = session_manager.get(&client_ip) {
-                            if let Some(client_ports) = session.client_ports.get(&proxy_port) {
-                                for client_port in client_ports {
-                                    let client_addr = SocketAddr::new(client_ip, *client_port);
-                                    debug!(
-                                        "Received {} bytes from target {} for client {} (port {})",
-                                        len, target_addr, client_ip, client_port
-                                    );
+                        debug!(
+                            "Received {} bytes from target {} for client {}",
+                            len, target_addr, client_addr
+                        );
 
-                                    if let Err(e) =
-                                        proxy_socket.send_to(&buffer[..len], client_addr).await
-                                    {
-                                        error!(
-                                            "Failed to forward packet to client {}: {}",
-                                            client_addr, e
-                                        );
-                                    }
-                                }
-                            }
+                        if let Err(e) = proxy_socket.send_to(&buffer[..len], client_addr).await {
+                            error!("Failed to forward packet to client {}: {}", client_addr, e);
                         }
                     }
                     Ok(Err(e)) => {
                         error!(
                             "Error receiving from target for client {}: {}",
-                            client_ip, e
+                            client_addr, e
                         );
                         break;
                     }
@@ -112,7 +97,7 @@ impl SessionSocket {
             }
             debug!(
                 "Receive task terminated for client {} on port {}",
-                client_ip, proxy_port
+                client_addr, proxy_port
             );
         });
     }
@@ -125,12 +110,11 @@ pub struct Session {
     /// Port mappings: (proxy_port, protocol) -> target_port
     pub port_mappings: HashMap<(u16, Protocol), u16>,
     pub last_activity: Instant,
-    /// Dedicated sockets for UDP sessions (one per proxy port)
-    /// Key: proxy_port -> SessionSocket
-    pub udp_sockets: HashMap<u16, SessionSocket>,
-    /// Track client source ports for response routing
-    /// Key: proxy_port -> Set of client source ports seen
-    pub client_ports: HashMap<u16, HashSet<u16>>,
+    /// Dedicated UDP sockets keyed by (proxy port, client source port).
+    /// Keeping client sockets isolated prevents overlapping connections from the
+    /// same IP (for example during Unreal ClientTravel) from sharing a backend
+    /// UDP flow and corrupting each other's packets.
+    pub udp_sockets: HashMap<(u16, u16), SessionSocket>,
 }
 
 impl Session {
@@ -143,7 +127,6 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
-            client_ports: HashMap::new(),
         }
     }
 
@@ -154,7 +137,6 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
-            client_ports: HashMap::new(),
         }
     }
 
@@ -164,18 +146,11 @@ impl Session {
         proxy_port: u16,
         client_addr: SocketAddr,
         proxy_socket: Arc<UdpSocket>,
-        session_manager: Arc<SessionManager>,
-    ) -> Result<(SessionSocket, u16), std::io::Error> {
-        // Track this client port
-        self.client_ports
-            .entry(proxy_port)
-            .or_default()
-            .insert(client_addr.port());
+    ) -> Result<SessionSocket, std::io::Error> {
+        let socket_key = (proxy_port, client_addr.port());
 
-        let client_port = client_addr.port();
-
-        if let Some(session_socket) = self.udp_sockets.get(&proxy_port) {
-            return Ok((session_socket.clone(), client_port));
+        if let Some(session_socket) = self.udp_sockets.get(&socket_key) {
+            return Ok(session_socket.clone());
         }
 
         // Create new socket
@@ -183,29 +158,25 @@ impl Session {
         let local_addr = session_socket.local_addr()?;
         debug!(
             "Created dedicated socket {} for client {} on proxy port {}",
-            local_addr,
-            client_addr.ip(),
-            proxy_port
+            local_addr, client_addr, proxy_port
         );
 
-        // Start receive task - pass client IP and session manager for port lookup
-        session_socket.start_receive_task(
-            client_addr.ip(),
-            proxy_port,
-            proxy_socket,
-            session_manager,
-        );
+        // Responses from this upstream socket belong only to this client socket.
+        session_socket.start_receive_task(client_addr, proxy_port, proxy_socket);
 
         // Store socket
-        self.udp_sockets.insert(proxy_port, session_socket.clone());
+        self.udp_sockets.insert(socket_key, session_socket.clone());
 
-        Ok((session_socket, client_port))
+        Ok(session_socket)
     }
 
     /// Shutdown all UDP sockets for this session
     pub async fn shutdown_sockets(&mut self) {
-        for (port, socket) in &self.udp_sockets {
-            debug!("Shutting down socket for port {}", port);
+        for ((proxy_port, client_port), socket) in &self.udp_sockets {
+            debug!(
+                "Shutting down socket for proxy port {} and client port {}",
+                proxy_port, client_port
+            );
             socket.shutdown().await;
         }
         self.udp_sockets.clear();
@@ -529,20 +500,57 @@ mod tests {
 
     #[tokio::test]
     async fn test_ip_based_sessions() {
-        // Test that sessions are keyed by IP only, not IP:Port
+        // Route selection is keyed by IP, so a query from a new source port
+        // replaces the destination used by the client's data socket.
         let manager = SessionManager::new(300);
         let client_addr1: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let client_addr2: SocketAddr = "127.0.0.1:54321".parse().unwrap(); // Same IP, different port
-        let target_addr: SocketAddr = "10.0.0.1:7777".parse().unwrap();
+        let target_addr1: SocketAddr = "10.0.0.1:7777".parse().unwrap();
+        let target_addr2: SocketAddr = "10.0.0.2:7777".parse().unwrap();
 
         // Create session with first port
-        manager.upsert(client_addr1, target_addr).await;
+        manager.upsert(client_addr1, target_addr1).await;
         assert_eq!(manager.count(), 1);
 
-        // Access from second port should use same session
+        // A second query from another source port must replace that same session.
+        manager.upsert(client_addr2, target_addr2).await;
         let session1 = manager.get_by_addr(&client_addr1).unwrap();
         let session2 = manager.get_by_addr(&client_addr2).unwrap();
+        assert_eq!(session1.target_ip, "10.0.0.2");
         assert_eq!(session1.target_ip, session2.target_ip);
         assert_eq!(manager.count(), 1); // Still only one session
+    }
+
+    #[tokio::test]
+    async fn test_udp_sockets_are_isolated_by_client_source_port() {
+        let mut session = Session::new("10.0.0.1:7777".parse().unwrap());
+        let proxy_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let old_client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let new_client_addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+
+        let old_socket = session
+            .get_or_create_udp_socket(7777, old_client_addr, proxy_socket.clone())
+            .await
+            .unwrap();
+        let new_socket = session
+            .get_or_create_udp_socket(7777, new_client_addr, proxy_socket.clone())
+            .await
+            .unwrap();
+        let reused_new_socket = session
+            .get_or_create_udp_socket(7777, new_client_addr, proxy_socket)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            old_socket.local_addr().unwrap(),
+            new_socket.local_addr().unwrap()
+        );
+        assert_eq!(
+            new_socket.local_addr().unwrap(),
+            reused_new_socket.local_addr().unwrap()
+        );
+        assert_eq!(session.udp_sockets.len(), 2);
+
+        session.shutdown_sockets().await;
     }
 }

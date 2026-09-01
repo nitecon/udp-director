@@ -589,13 +589,8 @@ impl DataProxy {
         let target_addr = session_ref.get_target_addr(proxy_port, Protocol::Udp)?;
 
         // Get or create dedicated socket for this session/port
-        let (session_socket, _client_port) = session_ref
-            .get_or_create_udp_socket(
-                proxy_port,
-                client_addr,
-                proxy_socket.clone(),
-                Arc::new(self.session_manager.clone()),
-            )
+        let session_socket = session_ref
+            .get_or_create_udp_socket(proxy_port, client_addr, proxy_socket.clone())
             .await?;
 
         debug!(

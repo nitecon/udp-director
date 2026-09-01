@@ -103,15 +103,24 @@ controlPacketMagicBytes: "FFFFFFFF52455345545F5632"  # "RESET_V2"
 **Session Entry**:
 ```rust
 struct Session {
-    target_addr: SocketAddr,      // Where to forward packets
-    last_activity: Instant,        // For timeout tracking
+    target_ip: String,
+    port_mappings: HashMap<(u16, Protocol), u16>,
+    last_activity: Instant,
+    udp_sockets: HashMap<(u16, u16), SessionSocket>,
+    // UDP socket key: (director proxy port, client source port)
 }
 ```
 
 **Session Map**:
 ```rust
-DashMap<SocketAddr, Session>  // Client addr → Session
+DashMap<IpAddr, Session>  // Client IP → active route
 ```
+
+Route selection is keyed by client IP so a query socket and a later game socket
+can use different source ports while sharing the newly selected destination.
+Within that route, each `(proxy port, client source port)` gets a dedicated
+upstream UDP socket. This prevents overlapping old and new game sockets during
+travel from being multiplexed into the same backend UDP flow.
 
 **Cleanup Strategy**:
 - Background task runs every 30 seconds
