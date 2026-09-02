@@ -19,6 +19,7 @@ A Kubernetes-native, high-performance stateful UDP/TCP proxy for dynamic routing
 - **[Testing Guide](Docs/Testing.md)** - Unit, integration, and load testing
 - **[Quick Reference](Docs/QuickReference.md)** - Commands and API reference
 - **[Project Summary](Docs/ProjectSummary.md)** - Implementation status
+- **[Project X routing](Docs/ProjectX.md)** - Exact-Pod allocation and drain contract
 - **[Changelog](Docs/Changelog.md)** - Version history
 
 ## What Problem Does This Solve?

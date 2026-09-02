@@ -7,6 +7,7 @@ use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::k8s_client::{K8sClient, StatusQuery};
+use crate::project_x::ProjectXRouter;
 use crate::session::SessionManager;
 use crate::token_cache::{TokenCache, TokenTarget};
 
@@ -24,6 +25,8 @@ pub enum QueryRequest {
     },
     /// Reset an existing session with a new token
     SessionReset { token: String },
+    /// Consume a trusted Project X controller reservation.
+    Allocation { token: String },
 }
 
 /// Status query DTO
@@ -59,6 +62,7 @@ pub struct QueryServer {
     token_cache: TokenCache,
     session_manager: SessionManager,
     config: Config,
+    project_x_router: Option<ProjectXRouter>,
 }
 
 impl QueryServer {
@@ -69,6 +73,7 @@ impl QueryServer {
         token_cache: TokenCache,
         session_manager: SessionManager,
         config: Config,
+        project_x_router: Option<ProjectXRouter>,
     ) -> Self {
         Self {
             port,
@@ -76,6 +81,7 @@ impl QueryServer {
             token_cache,
             session_manager,
             config,
+            project_x_router,
         }
     }
 
@@ -161,6 +167,11 @@ impl QueryServer {
                 label_selector,
                 annotation_selector,
             } => {
+                if self.config.project_x_allocation_only {
+                    return QueryResponse::Error {
+                        error: "controller allocation required".to_string(),
+                    };
+                }
                 self.process_resource_query(
                     resource_type,
                     namespace,
@@ -172,8 +183,24 @@ impl QueryServer {
                 .await
             }
             QueryRequest::SessionReset { token } => {
+                if self.config.project_x_allocation_only {
+                    return QueryResponse::Error {
+                        error: "controller allocation required".to_string(),
+                    };
+                }
                 self.process_session_reset(token, client_addr).await
             }
+            QueryRequest::Allocation { token } => match &self.project_x_router {
+                Some(router) => match router.bind(&token, client_addr, &self.config).await {
+                    Ok(()) => QueryResponse::Success { token },
+                    Err(error) => QueryResponse::Error {
+                        error: error.to_string(),
+                    },
+                },
+                None => QueryResponse::Error {
+                    error: "Project X allocation routing is not configured".to_string(),
+                },
+            },
         }
     }
 
@@ -508,6 +535,7 @@ impl Clone for QueryServer {
             token_cache: self.token_cache.clone(),
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
+            project_x_router: self.project_x_router.clone(),
         }
     }
 }

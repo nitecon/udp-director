@@ -64,6 +64,10 @@ pub struct Config {
     /// Load balancing configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_balancing: Option<LoadBalancingConfig>,
+
+    /// Require a controller reservation before any data route is installed.
+    #[serde(default)]
+    pub project_x_allocation_only: bool,
 }
 
 /// Default endpoint query configuration
@@ -286,6 +290,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
+            project_x_allocation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
@@ -314,6 +319,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
+            project_x_allocation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
@@ -340,6 +346,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
+            project_x_allocation_only: false,
         };
 
         let magic_bytes = config.get_magic_bytes().unwrap();

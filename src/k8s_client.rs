@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{
     Client,
     api::{Api, DynamicObject, ListParams},
@@ -26,6 +26,55 @@ impl K8sClient {
 
         info!("Kubernetes client initialized successfully");
         Ok(Self { client })
+    }
+
+    /// Verify that an allocation still names the exact Ready Project X Pod.
+    pub async fn verify_project_x_pod(
+        &self,
+        namespace: &str,
+        pod_name: &str,
+        pod_uid: &str,
+        map: &str,
+        build: &str,
+    ) -> Result<String> {
+        let pod = Api::<Pod>::namespaced(self.client.clone(), namespace)
+            .get(pod_name)
+            .await
+            .with_context(|| format!("Failed to read allocated Pod {namespace}/{pod_name}"))?;
+        Self::validate_project_x_pod(&pod, pod_uid, map, build)?;
+        pod.status
+            .and_then(|status| status.pod_ip)
+            .context("allocated Pod has no IP address")
+    }
+
+    fn validate_project_x_pod(pod: &Pod, pod_uid: &str, map: &str, build: &str) -> Result<()> {
+        if pod.metadata.uid.as_deref() != Some(pod_uid) {
+            anyhow::bail!("allocated Pod UID no longer matches");
+        }
+        if pod.metadata.deletion_timestamp.is_some() {
+            anyhow::bail!("allocated Pod is terminating");
+        }
+        let labels = pod
+            .metadata
+            .labels
+            .as_ref()
+            .context("allocated Pod has no labels")?;
+        if labels.get("games.nitecon.org/map").map(String::as_str) != Some(map)
+            || labels.get("games.nitecon.org/build").map(String::as_str) != Some(build)
+        {
+            anyhow::bail!("allocated Pod labels do not match the reservation");
+        }
+        let status = pod.status.as_ref().context("allocated Pod has no status")?;
+        let ready = status
+            .conditions
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|condition| condition.type_ == "Ready" && condition.status == "True");
+        if status.phase.as_deref() != Some("Running") || !ready {
+            anyhow::bail!("allocated Pod is not Ready");
+        }
+        Ok(())
     }
 
     /// Query for resources matching the given criteria
@@ -631,5 +680,39 @@ mod tests {
             &resource_no_annot,
             &selector
         ));
+    }
+
+    #[test]
+    fn project_x_pod_validation_requires_exact_uid_ready_and_labels() {
+        let pod: Pod = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "tutorial-0",
+                "uid": "exact-uid",
+                "labels": {
+                    "games.nitecon.org/map": "tutorial",
+                    "games.nitecon.org/build": "sha256:abc"
+                }
+            },
+            "status": {
+                "phase": "Running",
+                "podIP": "10.0.0.1",
+                "conditions": [{"type": "Ready", "status": "True"}]
+            }
+        }))
+        .unwrap();
+
+        assert!(
+            K8sClient::validate_project_x_pod(&pod, "exact-uid", "tutorial", "sha256:abc").is_ok()
+        );
+        assert!(
+            K8sClient::validate_project_x_pod(&pod, "replacement-uid", "tutorial", "sha256:abc")
+                .is_err()
+        );
+        assert!(
+            K8sClient::validate_project_x_pod(&pod, "exact-uid", "wrong-map", "sha256:abc")
+                .is_err()
+        );
     }
 }

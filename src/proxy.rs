@@ -208,6 +208,9 @@ impl DataProxy {
         let session = self.session_manager.get_by_addr(&client_addr);
 
         if session.is_none() {
+            if self.config.project_x_allocation_only {
+                anyhow::bail!("controller allocation required before TCP data");
+            }
             // No session - establish default route
             self.establish_default_session(client_addr, proxy_port, Protocol::Tcp)
                 .await?;
@@ -266,6 +269,9 @@ impl DataProxy {
                 .await?;
             self.session_manager.touch_by_addr(&client_addr);
         } else {
+            if self.config.project_x_allocation_only {
+                anyhow::bail!("controller allocation required before UDP data");
+            }
             // No session exists - establish default route for this client
             self.handle_first_packet(socket, client_addr, packet_data, proxy_port)
                 .await?;

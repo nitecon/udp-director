@@ -234,6 +234,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
+            project_x_allocation_only: false,
         };
 
         let k8s_client = K8sClient::new().await.unwrap();

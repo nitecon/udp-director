@@ -8,6 +8,7 @@ mod k8s_client;
 mod load_balancer;
 mod metrics;
 mod metrics_server;
+mod project_x;
 mod proxy;
 mod query_server;
 mod resource_monitor;
@@ -17,6 +18,7 @@ mod token_cache;
 use config::Config;
 use k8s_client::K8sClient;
 use load_balancer::LoadBalancer;
+use project_x::ProjectXRouter;
 use proxy::{DataProxy, DefaultEndpointCacheHandle};
 use query_server::QueryServer;
 use resource_monitor::ResourceMonitor;
@@ -61,6 +63,7 @@ async fn main() -> Result<()> {
     let token_cache = TokenCache::new(config.token_ttl_seconds);
     let mut session_manager = SessionManager::new(config.session_timeout_seconds);
     let default_endpoint_cache = DefaultEndpointCacheHandle::new();
+    let project_x_router = ProjectXRouter::from_env(k8s_client.clone(), session_manager.clone())?;
 
     // Initialize load balancer for session tracking
     let lb_config = config.get_load_balancing();
@@ -80,6 +83,7 @@ async fn main() -> Result<()> {
             token_cache.clone(),
             session_manager.clone(),
             config.clone(),
+            project_x_router.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = query_server.run().await {
@@ -129,6 +133,14 @@ async fn main() -> Result<()> {
         })
     };
 
+    let project_x_admin_handle = project_x_router.map(|router| {
+        tokio::spawn(async move {
+            if let Err(error) = router.run_admin_server().await {
+                warn!("Project X admin server error: {}", error);
+            }
+        })
+    });
+
     info!("UDP Director is running");
     info!("Query port: {}", config.query_port);
 
@@ -153,6 +165,13 @@ async fn main() -> Result<()> {
         _ = proxy_handle => warn!("Data proxy terminated unexpectedly"),
         _ = monitor_handle => warn!("Resource monitor terminated unexpectedly"),
         _ = metrics_handle => warn!("Metrics server terminated unexpectedly"),
+        _ = async {
+            if let Some(handle) = project_x_admin_handle {
+                let _ = handle.await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => warn!("Project X admin server terminated unexpectedly"),
     }
 
     // Perform graceful shutdown

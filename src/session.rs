@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -115,6 +116,8 @@ pub struct Session {
     /// same IP (for example during Unreal ClientTravel) from sharing a backend
     /// UDP flow and corrupting each other's packets.
     pub udp_sockets: HashMap<(u16, u16), SessionSocket>,
+    /// Exact Kubernetes Pod UID for controller-issued Project X routes.
+    pub pod_uid: Option<String>,
 }
 
 impl Session {
@@ -127,6 +130,7 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
+            pod_uid: None,
         }
     }
 
@@ -137,6 +141,7 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
+            pod_uid: None,
         }
     }
 
@@ -236,6 +241,7 @@ pub struct SessionManager {
     timeout_seconds: u64,
     /// Optional callback to notify when sessions are cleaned up
     cleanup_callback: Option<SessionCleanupCallback>,
+    route_history: Arc<DashMap<String, OffsetDateTime>>,
 }
 
 impl SessionManager {
@@ -245,6 +251,7 @@ impl SessionManager {
             sessions: Arc::new(DashMap::new()),
             timeout_seconds,
             cleanup_callback: None,
+            route_history: Arc::new(DashMap::new()),
         };
 
         // Start cleanup task
@@ -324,6 +331,34 @@ impl SessionManager {
             target_ip,
             port_mappings.len()
         );
+    }
+
+    /// Install a route bound to one exact Project X Pod UID.
+    pub async fn upsert_project_x(
+        &self,
+        client_addr: SocketAddr,
+        target_ip: String,
+        port_mappings: HashMap<(u16, Protocol), u16>,
+        pod_uid: String,
+    ) {
+        self.upsert_multi_port(client_addr, target_ip, port_mappings)
+            .await;
+        if let Some(mut session) = self.sessions.get_mut(&client_addr.ip()) {
+            session.pod_uid = Some(pod_uid.clone());
+        }
+        self.route_history
+            .insert(pod_uid, OffsetDateTime::now_utc());
+    }
+
+    /// Return the route count and last binding time, or `None` after an unknown restart.
+    pub fn project_x_route_status(&self, pod_uid: &str) -> Option<(usize, OffsetDateTime)> {
+        let last_new = *self.route_history.get(pod_uid)?;
+        let active = self
+            .sessions
+            .iter()
+            .filter(|entry| entry.value().pod_uid.as_deref() == Some(pod_uid))
+            .count();
+        Some((active, last_new))
     }
 
     /// Touch a session to update its last activity
@@ -552,5 +587,69 @@ mod tests {
         assert_eq!(session.udp_sockets.len(), 2);
 
         session.shutdown_sockets().await;
+    }
+
+    #[tokio::test]
+    async fn project_x_routes_are_exact_and_preserved_during_drain() {
+        let manager = SessionManager::new(300);
+        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let mut ports = HashMap::new();
+        ports.insert((7777, Protocol::Udp), 7777);
+        manager
+            .upsert_project_x(
+                client_addr,
+                "10.0.0.1".to_string(),
+                ports,
+                "exact-pod-uid".to_string(),
+            )
+            .await;
+
+        // Drain only blocks future controller reservations. The established
+        // route remains pinned until its normal session timeout.
+        let (active, _) = manager.project_x_route_status("exact-pod-uid").unwrap();
+        assert_eq!(active, 1);
+        assert_eq!(
+            manager
+                .get_by_addr(&client_addr)
+                .unwrap()
+                .pod_uid
+                .as_deref(),
+            Some("exact-pod-uid")
+        );
+        assert!(
+            manager
+                .project_x_route_status("different-pod-uid")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn project_x_route_history_reports_zero_after_route_ends() {
+        let manager = SessionManager::new(300);
+        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        manager
+            .upsert_project_x(
+                client_addr,
+                "10.0.0.1".to_string(),
+                HashMap::new(),
+                "pod-uid".to_string(),
+            )
+            .await;
+        manager
+            .upsert(client_addr, "10.0.0.2:7777".parse().unwrap())
+            .await;
+
+        let (active, _) = manager.project_x_route_status("pod-uid").unwrap();
+        assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn project_x_route_state_is_unknown_after_restart() {
+        let manager = SessionManager::new(300);
+        assert!(
+            manager
+                .project_x_route_status("pod-from-before-restart")
+                .is_none()
+        );
     }
 }
