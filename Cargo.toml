@@ -51,7 +51,7 @@ lazy_static = "1.5"
 hyper = { version = "1.5", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
-time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

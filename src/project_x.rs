@@ -37,6 +37,7 @@ struct Reservation {
     pod_name: String,
     map: String,
     build: String,
+    #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
 }
 
@@ -251,5 +252,21 @@ mod tests {
             ProjectXRouter::validate_reservation(&reservation(now + time::Duration::SECOND), now)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn decodes_go_rfc3339_reservation() {
+        let parsed: Reservation = serde_json::from_str(
+            r#"{
+                "podUid":"pod-uid",
+                "namespace":"project-x",
+                "podName":"tutorial-0",
+                "map":"m-tutorial",
+                "build":"506f5559",
+                "expiresAt":"2026-09-02T03:00:00.123456789Z"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.expires_at.year(), 2026);
     }
 }
