@@ -77,6 +77,28 @@ impl ProjectXRouter {
         client_addr: SocketAddr,
         config: &Config,
     ) -> Result<()> {
+        self.bind_route(allocation_token, client_addr, config, false)
+            .await
+    }
+
+    /// Consume a reservation and bind it to the exact gameplay UDP socket.
+    pub(crate) async fn bind_socket(
+        &self,
+        allocation_token: &str,
+        client_addr: SocketAddr,
+        config: &Config,
+    ) -> Result<()> {
+        self.bind_route(allocation_token, client_addr, config, true)
+            .await
+    }
+
+    async fn bind_route(
+        &self,
+        allocation_token: &str,
+        client_addr: SocketAddr,
+        config: &Config,
+        exact_socket: bool,
+    ) -> Result<()> {
         Self::validate_allocation_token(allocation_token)?;
         let reservation = self.consume(allocation_token).await?;
         Self::validate_reservation(&reservation, OffsetDateTime::now_utc())?;
@@ -95,9 +117,15 @@ impl ProjectXRouter {
             .into_iter()
             .map(|port| ((port.port, port.protocol), port.port))
             .collect::<HashMap<(u16, Protocol), u16>>();
-        self.sessions
-            .upsert_project_x(client_addr, target_ip, port_mappings, reservation.pod_uid)
-            .await;
+        if exact_socket {
+            self.sessions
+                .upsert_project_x(client_addr, target_ip, port_mappings, reservation.pod_uid)
+                .await;
+        } else {
+            self.sessions
+                .upsert_project_x_legacy(client_addr, target_ip, port_mappings, reservation.pod_uid)
+                .await;
+        }
         Ok(())
     }
 

@@ -11,6 +11,12 @@ use tracing::{debug, error, info};
 
 use crate::config::Protocol;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum SessionKey {
+    LegacyIp(IpAddr),
+    ExactSocket(SocketAddr),
+}
+
 /// Dedicated socket for a session to enable bi-directional UDP communication
 #[derive(Clone)]
 pub struct SessionSocket {
@@ -230,14 +236,14 @@ impl Session {
 /// Callback type for session cleanup notifications
 pub type SessionCleanupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// Session manager for tracking active client sessions with multi-port support
-/// Sessions are now tracked by client address only, established via query port
+/// Session manager for tracking active client sessions with multi-port support.
+///
+/// Legacy query sessions remain keyed by IP for backwards compatibility. Project
+/// X reservations are keyed by the gameplay `SocketAddr`, allowing multiple
+/// players behind one NAT address to hold independent exact-Pod routes.
 #[derive(Clone)]
 pub struct SessionManager {
-    /// Key: client_ip -> Session
-    /// Sessions are keyed by IP address only, not IP:Port
-    /// This ensures all connections from the same client use the same session
-    sessions: Arc<DashMap<IpAddr, Session>>,
+    sessions: Arc<DashMap<SessionKey, Session>>,
     timeout_seconds: u64,
     /// Optional callback to notify when sessions are cleaned up
     cleanup_callback: Option<SessionCleanupCallback>,
@@ -270,41 +276,49 @@ impl SessionManager {
 
     /// Get an existing session for a client IP address
     pub fn get(&self, client_ip: &IpAddr) -> Option<Session> {
-        self.sessions.get(client_ip).map(|entry| entry.clone())
+        self.sessions
+            .get(&SessionKey::LegacyIp(*client_ip))
+            .map(|entry| entry.clone())
     }
 
-    /// Get an existing session for a client SocketAddr (convenience method)
+    /// Get an exact-socket session, falling back to a legacy IP session.
     pub fn get_by_addr(&self, client_addr: &SocketAddr) -> Option<Session> {
-        self.get(&client_addr.ip())
+        self.sessions
+            .get(&SessionKey::ExactSocket(*client_addr))
+            .map(|entry| entry.clone())
+            .or_else(|| self.get(&client_addr.ip()))
     }
 
     /// Get a mutable reference to a session for socket creation
-    pub fn get_mut(
+    pub(crate) fn get_mut(
         &self,
         client_ip: &IpAddr,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, IpAddr, Session>> {
-        self.sessions.get_mut(client_ip)
+    ) -> Option<dashmap::mapref::one::RefMut<'_, SessionKey, Session>> {
+        self.sessions.get_mut(&SessionKey::LegacyIp(*client_ip))
     }
 
     /// Get a mutable reference to a session by SocketAddr (convenience method)
-    pub fn get_mut_by_addr(
+    pub(crate) fn get_mut_by_addr(
         &self,
         client_addr: &SocketAddr,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, IpAddr, Session>> {
-        self.get_mut(&client_addr.ip())
+    ) -> Option<dashmap::mapref::one::RefMut<'_, SessionKey, Session>> {
+        self.sessions
+            .get_mut(&SessionKey::ExactSocket(*client_addr))
+            .or_else(|| self.get_mut(&client_addr.ip()))
     }
 
     /// Update or create a session (for session reset) - single port version
     pub async fn upsert(&self, client_addr: SocketAddr, target_addr: SocketAddr) {
         let client_ip = client_addr.ip();
+        let key = SessionKey::LegacyIp(client_ip);
 
         // If session exists, shut down old sockets
-        if let Some(mut old_session) = self.sessions.get_mut(&client_ip) {
+        if let Some(mut old_session) = self.sessions.get_mut(&key) {
             old_session.shutdown_sockets().await;
         }
 
         let session = Session::new(target_addr);
-        self.sessions.insert(client_ip, session.clone());
+        self.sessions.insert(key, session.clone());
         debug!("Session upserted: {} -> {}", client_ip, target_addr);
     }
 
@@ -316,14 +330,15 @@ impl SessionManager {
         port_mappings: HashMap<(u16, Protocol), u16>,
     ) {
         let client_ip = client_addr.ip();
+        let key = SessionKey::LegacyIp(client_ip);
 
         // If session exists, shut down old sockets
-        if let Some(mut old_session) = self.sessions.get_mut(&client_ip) {
+        if let Some(mut old_session) = self.sessions.get_mut(&key) {
             old_session.shutdown_sockets().await;
         }
 
         let session = Session::new_multi_port(target_ip.clone(), port_mappings.clone());
-        self.sessions.insert(client_ip, session);
+        self.sessions.insert(key, session);
 
         debug!(
             "Multi-port session upserted: {} -> {} ({} ports)",
@@ -341,9 +356,35 @@ impl SessionManager {
         port_mappings: HashMap<(u16, Protocol), u16>,
         pod_uid: String,
     ) {
+        let key = SessionKey::ExactSocket(client_addr);
+        if let Some(mut old_session) = self.sessions.get_mut(&key) {
+            old_session.shutdown_sockets().await;
+        }
+
+        let mut session = Session::new_multi_port(target_ip, port_mappings);
+        session.pod_uid = Some(pod_uid.clone());
+        self.sessions.insert(key, session);
+        self.route_history
+            .insert(pod_uid, OffsetDateTime::now_utc());
+    }
+
+    /// Install a Project X route using the legacy IP key.
+    ///
+    /// This exists only for compatibility with query-port clients whose TCP
+    /// source port cannot match their subsequent gameplay UDP source port.
+    pub async fn upsert_project_x_legacy(
+        &self,
+        client_addr: SocketAddr,
+        target_ip: String,
+        port_mappings: HashMap<(u16, Protocol), u16>,
+        pod_uid: String,
+    ) {
         self.upsert_multi_port(client_addr, target_ip, port_mappings)
             .await;
-        if let Some(mut session) = self.sessions.get_mut(&client_addr.ip()) {
+        if let Some(mut session) = self
+            .sessions
+            .get_mut(&SessionKey::LegacyIp(client_addr.ip()))
+        {
             session.pod_uid = Some(pod_uid.clone());
         }
         self.route_history
@@ -363,14 +404,21 @@ impl SessionManager {
 
     /// Touch a session to update its last activity
     pub fn touch(&self, client_ip: &IpAddr) {
-        if let Some(mut entry) = self.sessions.get_mut(client_ip) {
+        if let Some(mut entry) = self.sessions.get_mut(&SessionKey::LegacyIp(*client_ip)) {
             entry.touch();
         }
     }
 
     /// Touch a session by SocketAddr (convenience method)
     pub fn touch_by_addr(&self, client_addr: &SocketAddr) {
-        self.touch(&client_addr.ip());
+        if let Some(mut entry) = self
+            .sessions
+            .get_mut(&SessionKey::ExactSocket(*client_addr))
+        {
+            entry.touch();
+        } else {
+            self.touch(&client_addr.ip());
+        }
     }
 
     /// Get the number of active sessions
@@ -635,12 +683,35 @@ mod tests {
                 "pod-uid".to_string(),
             )
             .await;
-        manager
-            .upsert(client_addr, "10.0.0.2:7777".parse().unwrap())
-            .await;
+        manager.clear_all().await;
 
         let (active, _) = manager.project_x_route_status("pod-uid").unwrap();
         assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn project_x_routes_are_isolated_by_exact_socket_behind_one_nat() {
+        let manager = SessionManager::new(300);
+        let first: SocketAddr = "203.0.113.10:40001".parse().unwrap();
+        let second: SocketAddr = "203.0.113.10:40002".parse().unwrap();
+        let mut ports = HashMap::new();
+        ports.insert((7777, Protocol::Udp), 7777);
+
+        manager
+            .upsert_project_x(
+                first,
+                "10.0.0.1".to_string(),
+                ports.clone(),
+                "pod-one".to_string(),
+            )
+            .await;
+        manager
+            .upsert_project_x(second, "10.0.0.2".to_string(), ports, "pod-two".to_string())
+            .await;
+
+        assert_eq!(manager.get_by_addr(&first).unwrap().target_ip, "10.0.0.1");
+        assert_eq!(manager.get_by_addr(&second).unwrap().target_ip, "10.0.0.2");
+        assert_eq!(manager.count(), 2);
     }
 
     #[tokio::test]

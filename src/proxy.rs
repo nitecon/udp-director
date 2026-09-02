@@ -1,16 +1,21 @@
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tokio::sync::{Notify, RwLock};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, DataPortConfig, Protocol};
 use crate::k8s_client::K8sClient;
 use crate::load_balancer::LoadBalancer;
+use crate::project_x::ProjectXRouter;
 use crate::session::SessionManager;
 use crate::token_cache::TokenCache;
+
+const PROJECT_X_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Cached default endpoint target with multi-port support
 #[derive(Clone, Debug)]
@@ -29,6 +34,8 @@ pub struct DataProxy {
     k8s_client: K8sClient,
     default_endpoint_cache: Arc<RwLock<Option<DefaultEndpointCache>>>,
     load_balancer: LoadBalancer,
+    project_x_router: Option<ProjectXRouter>,
+    pending_project_x_setups: Arc<DashMap<SocketAddr, Arc<Notify>>>,
 }
 
 /// Shared cache for default endpoint that can be invalidated
@@ -65,6 +72,7 @@ impl DataProxy {
         config: Config,
         k8s_client: K8sClient,
         cache_handle: DefaultEndpointCacheHandle,
+        project_x_router: Option<ProjectXRouter>,
     ) -> Self {
         let data_ports = config.get_data_ports();
         let lb_config = config.get_load_balancing();
@@ -78,6 +86,8 @@ impl DataProxy {
             k8s_client,
             default_endpoint_cache: cache_handle.get_cache(),
             load_balancer,
+            project_x_router,
+            pending_project_x_setups: Arc::new(DashMap::new()),
         }
     }
 
@@ -135,11 +145,29 @@ impl DataProxy {
                     let socket_clone = socket.clone();
                     let proxy = self.clone();
 
+                    let is_project_x_setup = proxy.config.project_x_allocation_only
+                        && proxy.is_control_packet(&packet_data)?;
+                    if is_project_x_setup {
+                        if proxy.pending_project_x_setups.contains_key(&client_addr) {
+                            warn!(
+                                "Ignoring concurrent Project X setup packet from {}",
+                                client_addr
+                            );
+                            continue;
+                        }
+                        proxy
+                            .pending_project_x_setups
+                            .insert(client_addr, Arc::new(Notify::new()));
+                    }
+
                     tokio::spawn(async move {
-                        if let Err(e) = proxy
+                        let result = proxy
                             .handle_udp_packet(socket_clone, client_addr, packet_data, proxy_port)
-                            .await
-                        {
+                            .await;
+                        if is_project_x_setup {
+                            proxy.complete_project_x_setup(&client_addr);
+                        }
+                        if let Err(e) = result {
                             error!(
                                 "Error handling UDP packet from {} on port {}: {}",
                                 client_addr, proxy_port, e
@@ -190,9 +218,81 @@ impl DataProxy {
         packet_data: Vec<u8>,
         proxy_port: u16,
     ) -> Result<()> {
-        // Route based on existing session - no more control packet handling
+        if let Some(token) = self.control_packet_token(&packet_data)? {
+            return self.handle_udp_control_packet(client_addr, token).await;
+        }
+
         self.handle_udp_data_packet(socket, client_addr, packet_data, proxy_port)
             .await
+    }
+
+    fn is_control_packet(&self, packet_data: &[u8]) -> Result<bool> {
+        let magic_bytes = self.config.get_magic_bytes()?;
+        Ok(packet_data.starts_with(&magic_bytes))
+    }
+
+    fn control_packet_token<'a>(&self, packet_data: &'a [u8]) -> Result<Option<&'a str>> {
+        let magic_bytes = self.config.get_magic_bytes()?;
+        if !packet_data.starts_with(&magic_bytes) {
+            return Ok(None);
+        }
+        let token = std::str::from_utf8(&packet_data[magic_bytes.len()..])
+            .context("control packet token must be UTF-8")?;
+        Ok(Some(token))
+    }
+
+    async fn handle_udp_control_packet(&self, client_addr: SocketAddr, token: &str) -> Result<()> {
+        if self.config.project_x_allocation_only {
+            let router = self
+                .project_x_router
+                .as_ref()
+                .context("Project X allocation routing is not configured")?;
+            tokio::time::timeout(
+                PROJECT_X_SETUP_TIMEOUT,
+                router.bind_socket(token, client_addr, &self.config),
+            )
+            .await
+            .context("Project X gameplay socket setup timed out")??;
+            info!(
+                "Project X gameplay socket route established for {}",
+                client_addr
+            );
+            return Ok(());
+        }
+
+        let target = self
+            .token_cache
+            .lookup(token)
+            .await
+            .context("invalid or expired control packet token")?;
+        self.session_manager
+            .upsert_multi_port(client_addr, target.cluster_ip, target.port_mappings)
+            .await;
+        info!("Legacy UDP session reset for {}", client_addr);
+        Ok(())
+    }
+
+    fn complete_project_x_setup(&self, client_addr: &SocketAddr) {
+        if let Some((_, notify)) = self.pending_project_x_setups.remove(client_addr) {
+            notify.notify_waiters();
+        }
+    }
+
+    async fn wait_for_project_x_setup(&self, client_addr: &SocketAddr) {
+        loop {
+            let Some(notify) = self
+                .pending_project_x_setups
+                .get(client_addr)
+                .map(|entry| entry.clone())
+            else {
+                return;
+            };
+            let notified = notify.notified();
+            if !self.pending_project_x_setups.contains_key(client_addr) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Handle a TCP connection
@@ -262,7 +362,11 @@ impl DataProxy {
         packet_data: Vec<u8>,
         proxy_port: u16,
     ) -> Result<()> {
-        // Check if session exists for this client IP
+        if self.config.project_x_allocation_only {
+            self.wait_for_project_x_setup(&client_addr).await;
+        }
+
+        // Exact Project X routes take precedence over legacy IP routes.
         if self.session_manager.get_by_addr(&client_addr).is_some() {
             // Session exists - get or create dedicated socket and forward packet
             self.proxy_packet_bidirectional(socket, client_addr, packet_data, proxy_port)
@@ -628,6 +732,8 @@ impl Clone for DataProxy {
             k8s_client: self.k8s_client.clone(),
             default_endpoint_cache: self.default_endpoint_cache.clone(),
             load_balancer: self.load_balancer.clone(),
+            project_x_router: self.project_x_router.clone(),
+            pending_project_x_setups: self.pending_project_x_setups.clone(),
         }
     }
 }
@@ -645,5 +751,19 @@ mod tests {
         let token_bytes = &packet[magic_bytes.len()..];
         let token = String::from_utf8_lossy(token_bytes);
         assert_eq!(token, "test-token-123");
+    }
+
+    #[test]
+    fn project_x_setup_packet_matches_unreal_wire_format() {
+        let magic_bytes = hex::decode("FFFFFFFF5245534554").unwrap();
+        let mut packet = magic_bytes.clone();
+        packet.extend_from_slice(b"controller-reservation-token");
+
+        assert!(packet.starts_with(&magic_bytes));
+        assert_eq!(
+            std::str::from_utf8(&packet[magic_bytes.len()..]).unwrap(),
+            "controller-reservation-token"
+        );
+        assert!(!packet[magic_bytes.len()..].starts_with(b"{"));
     }
 }

@@ -25,6 +25,45 @@ Set `projectXAllocationOnly: true` in the mounted configuration to reject
 legacy resource queries, token resets, and first-packet fallback routing. This
 is required for Project X deployments.
 
+## Gameplay-socket setup datagram
+
+Project X clients bind a reservation to the public gameplay UDP socket by
+sending one setup datagram to the director's normal UDP data endpoint (for
+example, the advertised director address on port `7777`). The setup datagram
+must originate from the exact socket that will send Unreal gameplay packets:
+
+```text
+FF FF FF FF 52 45 53 45 54 <raw UTF-8 allocation token>
+|--------- 9-byte magic ---------| |--- no JSON, NUL, or newline ---|
+```
+
+The default magic is configured by
+`controlPacketMagicBytes: "FFFFFFFF5245534554"`. The allocation token starts
+at byte 9 and occupies the remainder of the datagram. The director consumes
+this control datagram; it is never forwarded to Unreal.
+
+Send the setup datagram immediately before the first Unreal handshake packet.
+The director orders subsequent packets from that same `SocketAddr` behind the
+controller reservation check, so the first handshake cannot overtake setup.
+The director allows the controller and Pod checks up to 10 seconds. There is no
+UDP acknowledgement. A token is single-use at the capacity controller; clients
+must not retry the same setup datagram. On a send error or connection timeout,
+request a fresh reservation instead.
+
+The controller defines reservation expiry. A malformed, expired, replayed, or
+unavailable-target reservation installs no route. If the gameplay socket
+already had an exact route, that route remains unchanged; otherwise subsequent
+gameplay is rejected while `projectXAllocationOnly` is enabled. Logs identify
+the client socket and outcome but never include the allocation token.
+
+Exact Project X routes are keyed by the complete public `SocketAddr`, so two
+players behind one NAT address remain independent. Legacy query and reset
+clients continue to use IP-keyed sessions when `projectXAllocationOnly` is
+false. In that compatibility mode, the same magic packet carries a director
+cache token and retains the historical IP-keyed reset behavior. The TCP
+`{"type":"allocation"}` request also remains available as an IP-keyed legacy
+bridge, but new Project X clients must use the gameplay-socket datagram.
+
 ## Drain and route observations
 
 Draining is enforced when the controller atomically consumes a reservation.

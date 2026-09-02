@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
             config.clone(),
             k8s_client.clone(),
             default_endpoint_cache.clone(),
+            project_x_router.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = data_proxy.run().await {
