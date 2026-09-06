@@ -100,7 +100,7 @@ impl ProjectXRouter {
         exact_socket: bool,
     ) -> Result<()> {
         Self::validate_allocation_token(allocation_token)?;
-        let reservation = self.consume(allocation_token).await?;
+        let reservation = self.consume(allocation_token, client_addr).await?;
         Self::validate_reservation(&reservation, OffsetDateTime::now_utc())?;
         let target_ip = self
             .k8s_client
@@ -154,7 +154,11 @@ impl ProjectXRouter {
         Ok(())
     }
 
-    async fn consume(&self, allocation_token: &str) -> Result<Reservation> {
+    async fn consume(
+        &self,
+        allocation_token: &str,
+        client_addr: SocketAddr,
+    ) -> Result<Reservation> {
         let identity_token = tokio::fs::read_to_string(&self.token_path)
             .await
             .with_context(|| format!("failed to read {}", self.token_path.display()))?;
@@ -164,11 +168,7 @@ impl ProjectXRouter {
         )
         .parse()
         .context("invalid controller URL")?;
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .header("Authorization", format!("Bearer {}", identity_token.trim()))
-            .body(Empty::<Bytes>::new())?;
+        let request = Self::consume_request(uri, identity_token.trim(), client_addr)?;
         let client: Client<HttpConnector, Empty<Bytes>> =
             Client::builder(TokioExecutor::new()).build_http();
         let response = client
@@ -180,6 +180,20 @@ impl ProjectXRouter {
         }
         let body = response.into_body().collect().await?.to_bytes();
         serde_json::from_slice(&body).context("controller returned an invalid reservation")
+    }
+
+    fn consume_request(
+        uri: Uri,
+        identity_token: &str,
+        client_addr: SocketAddr,
+    ) -> Result<Request<Empty<Bytes>>> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("Authorization", format!("Bearer {identity_token}"))
+            .header("X-Udp-Client-Address", client_addr.to_string())
+            .body(Empty::<Bytes>::new())
+            .context("failed to build allocation-controller request")
     }
 
     pub(crate) async fn run_admin_server(self) -> Result<()> {
@@ -296,5 +310,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.expires_at.year(), 2026);
+    }
+
+    #[test]
+    fn allocation_controller_receives_exact_gameplay_socket() {
+        let request = ProjectXRouter::consume_request(
+            "http://controller/v1alpha1/reservations/token/consume"
+                .parse()
+                .unwrap(),
+            "workload-token",
+            "203.0.113.8:41000".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()["X-Udp-Client-Address"],
+            "203.0.113.8:41000"
+        );
+        assert_eq!(request.headers()["Authorization"], "Bearer workload-token");
     }
 }
