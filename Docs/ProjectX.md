@@ -2,35 +2,19 @@
 
 # Project X exact-Pod routing
 
-Project X uses StarXAPI-authoritative, single-use allocations instead of
-Agones or client-selected Kubernetes resources. Before StarXAPI publishes a
-usable client token, the regional capacity controller installs the exact
-allocation through the cluster-private admin listener:
+Project X uses controller-issued, single-use allocation reservations instead of
+Agones or client-selected Kubernetes resources. The public query listener
+accepts this request:
 
 ```json
-{
-  "apiVersion":"runtime.games.nitecon.org/v1alpha1",
-  "installId":"director:allocation-id",
-  "ticketId":"ticket-id",
-  "allocationId":"allocation-id",
-  "routingToken":"opaque-routing-token",
-  "podUid":"exact-pod-uid",
-  "namespace":"project-x",
-  "podName":"new-dawn-01-abcd",
-  "map":"new-dawn-01",
-  "build":"078e1fdc",
-  "expiresAt":"2026-09-07T00:00:00Z"
-}
+{"type":"allocation","token":"controller-reservation-token"}
 ```
 
-The route is installed with `POST /v1alpha1/allocations`. Canonical request and
-response fixtures live in StarXAPI under
-`Docs/Fixtures/runtime-v1alpha1/director-install.json` and
-`allocation-installed-response.json`. Repeating an identical `installId` is
-idempotent. A conflicting `installId` or `routingToken` returns HTTP 409.
-
-The director reads the named Pod and independently requires all of the
-following before accepting the install:
+The director consumes the reservation through the regional capacity controller
+using its projected Kubernetes service-account token. The controller confirms
+that the reservation is unexpired and that its server agent still reports
+`Ready` and `Accepting`. The director then reads the named Pod and independently
+requires all of the following before creating the route:
 
 - the current Kubernetes object has the exact reserved Pod UID;
 - the Pod is `Running`, has a `Ready=True` condition, and is not terminating;
@@ -49,24 +33,24 @@ example, the advertised director address on port `7777`). The setup datagram
 must originate from the exact socket that will send Unreal gameplay packets:
 
 ```text
-FF FF FF FF 52 45 53 45 54 <raw UTF-8 routing token>
+FF FF FF FF 52 45 53 45 54 <raw UTF-8 allocation token>
 |--------- 9-byte magic ---------| |--- no JSON, NUL, or newline ---|
 ```
 
 The default magic is configured by
-`controlPacketMagicBytes: "FFFFFFFF5245534554"`. The routing token starts
+`controlPacketMagicBytes: "FFFFFFFF5245534554"`. The allocation token starts
 at byte 9 and occupies the remainder of the datagram. The director consumes
 this control datagram; it is never forwarded to Unreal.
 
 Send the setup datagram immediately before the first Unreal handshake packet.
 The director orders subsequent packets from that same `SocketAddr` behind the
 controller reservation check, so the first handshake cannot overtake setup.
-The director allows the local allocation and Pod checks up to 10 seconds. There
-is no UDP acknowledgement. Repeating the same setup from the same gameplay
-`SocketAddr` is idempotent, which covers a lost setup datagram. Replaying it
-from another source address or port fails closed.
+The director allows the controller and Pod checks up to 10 seconds. There is no
+UDP acknowledgement. A token is single-use at the capacity controller; clients
+must not retry the same setup datagram. On a send error or connection timeout,
+request a fresh reservation instead.
 
-StarXAPI defines allocation expiry. A malformed, expired, replayed, or
+The controller defines reservation expiry. A malformed, expired, replayed, or
 unavailable-target reservation installs no route. If the gameplay socket
 already had an exact route, that route remains unchanged; otherwise subsequent
 gameplay is rejected while `projectXAllocationOnly` is enabled. Logs identify
@@ -82,24 +66,22 @@ bridge, but new Project X clients must use the gameplay-socket datagram.
 
 ## Drain and route observations
 
-Draining is enforced before StarXAPI grants an allocation. Once a route exists,
-changing the server to draining does not interrupt it; the normal inactivity
-timeout retires it.
+Draining is enforced when the controller atomically consumes a reservation.
+Once a route exists, changing the agent to draining does not interrupt it; the
+normal inactivity timeout retires it.
 
 The private admin listener exposes:
 
 - `GET /livez` and `GET /readyz`;
-- `POST /v1alpha1/allocations`, accepting the authoritative install fixture;
 - `GET /v1alpha1/pods/{podUID}/routes`, returning
   `{"activeRoutes":0,"lastNewRouteAt":"RFC3339"}`.
 
 Route history remains available after the final route ends, so the controller
-can observe a genuine zero and enforce its cooldown. Director install and route
-state are intentionally memory-local; StarXAPI owns the durable allocation
-ledger and the controller retries unfinished installs. After a director
-restart, unknown tokens and unobserved Pod UIDs fail closed, and the latter
-returns HTTP 503 instead of guessing zero. The Project X deployment therefore
-uses one replica until shared route state is implemented.
+can observe a genuine zero and enforce its cooldown. State is intentionally
+memory-local. After a director restart, an unobserved Pod UID returns HTTP 503
+instead of guessing zero, which makes automatic Pod deletion fail closed. The
+Project X deployment therefore uses one replica until shared route state is
+implemented.
 
 The regional image is published as
 `us-east4-docker.pkg.dev/nitecon-datacenter/starx/udp-director:<git-hash>`.
