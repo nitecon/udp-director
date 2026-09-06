@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
+use dashmap::DashMap;
 use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::Bytes;
+use hyper::body::{Body, Bytes};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri};
@@ -11,9 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::config::{Config, Protocol};
@@ -27,9 +30,12 @@ pub(crate) struct ProjectXRouter {
     k8s_client: K8sClient,
     sessions: SessionManager,
     admin_port: u16,
+    allocations: Arc<DashMap<String, InstalledAllocation>>,
+    install_ids: Arc<DashMap<String, String>>,
+    install_lock: Arc<Mutex<()>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Reservation {
     pod_uid: String,
@@ -39,6 +45,29 @@ struct Reservation {
     build: String,
     #[serde(with = "time::serde::rfc3339")]
     expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallAllocation {
+    api_version: String,
+    install_id: String,
+    ticket_id: String,
+    allocation_id: String,
+    routing_token: String,
+    pod_uid: String,
+    namespace: String,
+    pod_name: String,
+    map: String,
+    build: String,
+    #[serde(with = "time::serde::rfc3339")]
+    expires_at: OffsetDateTime,
+}
+
+#[derive(Clone, Debug)]
+struct InstalledAllocation {
+    request: InstallAllocation,
+    client_addr: Option<SocketAddr>,
 }
 
 #[derive(Serialize)]
@@ -68,6 +97,9 @@ impl ProjectXRouter {
             k8s_client,
             sessions,
             admin_port,
+            allocations: Arc::new(DashMap::new()),
+            install_ids: Arc::new(DashMap::new()),
+            install_lock: Arc::new(Mutex::new(())),
         }))
     }
 
@@ -100,7 +132,11 @@ impl ProjectXRouter {
         exact_socket: bool,
     ) -> Result<()> {
         Self::validate_allocation_token(allocation_token)?;
-        let reservation = self.consume(allocation_token).await?;
+        let reservation = if exact_socket {
+            self.consume_installed(allocation_token, client_addr)?
+        } else {
+            self.consume_legacy(allocation_token).await?
+        };
         Self::validate_reservation(&reservation, OffsetDateTime::now_utc())?;
         let target_ip = self
             .k8s_client
@@ -154,7 +190,20 @@ impl ProjectXRouter {
         Ok(())
     }
 
-    async fn consume(&self, allocation_token: &str) -> Result<Reservation> {
+    fn consume_installed(
+        &self,
+        routing_token: &str,
+        client_addr: SocketAddr,
+    ) -> Result<Reservation> {
+        let now = OffsetDateTime::now_utc();
+        let mut allocation = self
+            .allocations
+            .get_mut(routing_token)
+            .context("allocation is unknown or was not installed")?;
+        allocation.bind(client_addr, now)
+    }
+
+    async fn consume_legacy(&self, allocation_token: &str) -> Result<Reservation> {
         let identity_token = tokio::fs::read_to_string(&self.token_path)
             .await
             .with_context(|| format!("failed to read {}", self.token_path.display()))?;
@@ -194,7 +243,7 @@ impl ProjectXRouter {
                         TokioIo::new(stream),
                         service_fn(move |request| {
                             let router = router.clone();
-                            async move { router.admin_request(request) }
+                            async move { router.admin_request(request).await }
                         }),
                     )
                     .await;
@@ -205,13 +254,16 @@ impl ProjectXRouter {
         }
     }
 
-    fn admin_request(
+    async fn admin_request(
         self,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
         let path = request.uri().path();
         if request.method() == Method::GET && (path == "/livez" || path == "/readyz") {
             return Self::response(StatusCode::NO_CONTENT, Bytes::new(), "text/plain");
+        }
+        if request.method() == Method::POST && path == "/v1alpha1/allocations" {
+            return self.install_allocation(request).await;
         }
         let prefix = "/v1alpha1/pods/";
         let suffix = "/routes";
@@ -237,6 +289,136 @@ impl ProjectXRouter {
         Self::response(StatusCode::OK, Bytes::from(body), "application/json")
     }
 
+    async fn install_allocation(
+        &self,
+        request: Request<hyper::body::Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
+        if request
+            .body()
+            .size_hint()
+            .upper()
+            .is_some_and(|length| length > 65_536)
+        {
+            return Self::response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Bytes::from("request body is too large"),
+                "text/plain",
+            );
+        }
+        let body = request.into_body().collect().await?.to_bytes();
+        if body.len() > 65_536 {
+            return Self::response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Bytes::from("request body is too large"),
+                "text/plain",
+            );
+        }
+        let install: InstallAllocation = match serde_json::from_slice(&body) {
+            Ok(install) => install,
+            Err(_) => {
+                return Self::response(
+                    StatusCode::BAD_REQUEST,
+                    Bytes::from("invalid allocation install"),
+                    "text/plain",
+                );
+            }
+        };
+        if let Err(error) = Self::validate_install(&install, OffsetDateTime::now_utc()) {
+            return Self::response(
+                StatusCode::BAD_REQUEST,
+                Bytes::from(error.to_string()),
+                "text/plain",
+            );
+        }
+        let _install_guard = self.install_lock.lock().await;
+        if let Some(existing_token) = self.install_ids.get(&install.install_id) {
+            let identical = existing_token.value() == &install.routing_token
+                && self
+                    .allocations
+                    .get(existing_token.value())
+                    .is_some_and(|existing| existing.request == install);
+            return if identical {
+                Self::install_response(&install)
+            } else {
+                Self::response(
+                    StatusCode::CONFLICT,
+                    Bytes::from("installId conflicts with an existing allocation"),
+                    "text/plain",
+                )
+            };
+        }
+        if self.allocations.contains_key(&install.routing_token) {
+            return Self::response(
+                StatusCode::CONFLICT,
+                Bytes::from("routingToken conflicts with an existing allocation"),
+                "text/plain",
+            );
+        }
+        if let Err(error) = self
+            .k8s_client
+            .verify_project_x_pod(
+                &install.namespace,
+                &install.pod_name,
+                &install.pod_uid,
+                &install.map,
+                &install.build,
+            )
+            .await
+        {
+            return Self::response(
+                StatusCode::CONFLICT,
+                Bytes::from(format!("allocated Pod was not verified: {error}")),
+                "text/plain",
+            );
+        }
+        self.allocations.insert(
+            install.routing_token.clone(),
+            InstalledAllocation {
+                request: install.clone(),
+                client_addr: None,
+            },
+        );
+        self.install_ids
+            .insert(install.install_id.clone(), install.routing_token.clone());
+        Self::install_response(&install)
+    }
+
+    fn validate_install(install: &InstallAllocation, now: OffsetDateTime) -> Result<()> {
+        if install.api_version != "runtime.games.nitecon.org/v1alpha1" {
+            anyhow::bail!("unsupported apiVersion");
+        }
+        if install.install_id != format!("director:{}", install.allocation_id) {
+            anyhow::bail!("installId does not match allocationId");
+        }
+        if install.expires_at <= now {
+            anyhow::bail!("allocation expired");
+        }
+        for (name, value) in [
+            ("installId", install.install_id.as_str()),
+            ("ticketId", install.ticket_id.as_str()),
+            ("allocationId", install.allocation_id.as_str()),
+            ("routingToken", install.routing_token.as_str()),
+            ("podUid", install.pod_uid.as_str()),
+            ("namespace", install.namespace.as_str()),
+            ("podName", install.pod_name.as_str()),
+            ("map", install.map.as_str()),
+            ("build", install.build.as_str()),
+        ] {
+            if value.is_empty() || value.len() > 512 {
+                anyhow::bail!("{name} is invalid");
+            }
+        }
+        Self::validate_allocation_token(&install.routing_token)
+    }
+
+    fn install_response(install: &InstallAllocation) -> Result<Response<Full<Bytes>>> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "allocationId": install.allocation_id,
+            "status": "installed"
+        }))?;
+        Self::response(StatusCode::OK, Bytes::from(body), "application/json")
+    }
+
     fn response(
         status: StatusCode,
         body: Bytes,
@@ -247,6 +429,31 @@ impl ProjectXRouter {
             .header("Content-Type", content_type)
             .body(Full::new(body))
             .context("failed to build admin response")
+    }
+}
+
+impl InstallAllocation {
+    fn reservation(&self) -> Reservation {
+        Reservation {
+            pod_uid: self.pod_uid.clone(),
+            namespace: self.namespace.clone(),
+            pod_name: self.pod_name.clone(),
+            map: self.map.clone(),
+            build: self.build.clone(),
+            expires_at: self.expires_at,
+        }
+    }
+}
+
+impl InstalledAllocation {
+    fn bind(&mut self, client_addr: SocketAddr, now: OffsetDateTime) -> Result<Reservation> {
+        ProjectXRouter::validate_install(&self.request, now)?;
+        match self.client_addr {
+            None => self.client_addr = Some(client_addr),
+            Some(bound) if bound == client_addr => {}
+            Some(_) => anyhow::bail!("allocation routing token was already consumed"),
+        }
+        Ok(self.request.reservation())
     }
 }
 
@@ -261,6 +468,22 @@ mod tests {
             pod_name: "map-0".to_string(),
             map: "tutorial".to_string(),
             build: "sha256:abc".to_string(),
+            expires_at,
+        }
+    }
+
+    fn install(expires_at: OffsetDateTime) -> InstallAllocation {
+        InstallAllocation {
+            api_version: "runtime.games.nitecon.org/v1alpha1".to_string(),
+            install_id: "director:allocation-id".to_string(),
+            ticket_id: "ticket-id".to_string(),
+            allocation_id: "allocation-id".to_string(),
+            routing_token: "route-token".to_string(),
+            pod_uid: "pod-uid".to_string(),
+            namespace: "project-x".to_string(),
+            pod_name: "map-0".to_string(),
+            map: "new-dawn-01".to_string(),
+            build: "078e1fdc".to_string(),
             expires_at,
         }
     }
@@ -296,5 +519,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.expires_at.year(), 2026);
+    }
+
+    #[test]
+    fn validates_authoritative_install_contract() {
+        let now = OffsetDateTime::now_utc();
+        assert!(
+            ProjectXRouter::validate_install(&install(now + time::Duration::MINUTE), now).is_ok()
+        );
+        assert!(ProjectXRouter::validate_install(&install(now), now).is_err());
+        let mut wrong_version = install(now + time::Duration::MINUTE);
+        wrong_version.api_version = "v1".to_string();
+        assert!(ProjectXRouter::validate_install(&wrong_version, now).is_err());
+        let mut mismatched_install = install(now + time::Duration::MINUTE);
+        mismatched_install.install_id = "director:other-allocation".to_string();
+        assert!(ProjectXRouter::validate_install(&mismatched_install, now).is_err());
+    }
+
+    #[test]
+    fn routing_token_retries_only_from_the_same_gameplay_socket() {
+        let now = OffsetDateTime::now_utc();
+        let mut allocation = InstalledAllocation {
+            request: install(now + time::Duration::MINUTE),
+            client_addr: None,
+        };
+        let first = "10.0.0.1:41000".parse().unwrap();
+        let replay = "10.0.0.1:41001".parse().unwrap();
+        assert!(allocation.bind(first, now).is_ok());
+        assert!(allocation.bind(first, now).is_ok());
+        assert!(allocation.bind(replay, now).is_err());
     }
 }
