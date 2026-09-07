@@ -7,6 +7,12 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Internal and product-specific dependencies are being removed from this public
+open-source project. Integrations use a generic, configurable reservation-controller
+interface; product-specific allocation policy and services belong in their own projects.
+
 ## [0.2.1] - 2025-11-03
 
 ### Added - Annotation Selector Support
