@@ -324,7 +324,7 @@ mod tests {
         let parsed: Reservation = serde_json::from_str(
             r#"{
                 "podUid":"pod-uid",
-                "namespace":"project-x",
+                "namespace":"games",
                 "podName":"tutorial-0",
                 "map":"tutorial",
                 "build":"506f5559",

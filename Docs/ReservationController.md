@@ -10,10 +10,10 @@ accepts this request:
 {"type":"allocation","token":"controller-reservation-token"}
 ```
 
-The director consumes the reservation through the regional capacity controller
-using its projected Kubernetes service-account token. The controller confirms
-that the reservation is unexpired and that its server agent still reports
-`Ready` and `Accepting`. The director then reads the named Pod and independently
+The director requests a reservation from the configured controller using a
+bearer token read from the configured token file. The controller owns admission,
+expiry, and replay policy; the director does not require a server agent or a
+particular allocation service. The director then reads the named Pod and independently
 requires all of the following before creating the route:
 
 - the current Kubernetes object has the exact reserved Pod UID;
@@ -57,9 +57,9 @@ Send the setup datagram immediately before the first gameplay handshake packet.
 The director orders subsequent packets from that same `SocketAddr` behind the
 controller reservation check, so the first handshake cannot overtake setup.
 The director allows the controller and Pod checks up to 10 seconds. There is no
-UDP acknowledgement. A token is single-use at the capacity controller; clients
-must not retry the same setup datagram. On a send error or connection timeout,
-request a fresh reservation instead.
+UDP acknowledgement. Retry safety depends on the controller's consume policy;
+the director does not provide a durable idempotency guarantee. Clients must
+follow their controller's retry and reconnect contract.
 
 The controller defines reservation expiry. A malformed, expired, replayed, or
 unavailable-target reservation installs no route. If the gameplay socket
@@ -78,7 +78,7 @@ bridge, but new reservation clients must use the gameplay-socket datagram.
 ## Drain and route observations
 
 Draining is enforced when the controller atomically consumes a reservation.
-Once a route exists, changing the agent to draining does not interrupt it; the
+Once a route exists, controller-side draining does not interrupt it; the
 normal inactivity timeout retires it.
 
 The private admin listener exposes:
@@ -86,6 +86,11 @@ The private admin listener exposes:
 - `GET /livez` and `GET /readyz`;
 - `GET /v1alpha1/pods/{podUID}/routes`, returning
   `{"activeRoutes":0,"lastNewRouteAt":"RFC3339"}`.
+
+The admin listener binds all interfaces and does not authenticate requests.
+Deployments must restrict access through their network policy or an
+authenticated proxy. The controller client currently supports plain HTTP;
+transport protection must be supplied by the deployment when needed.
 
 Route history remains available after the final route ends, so the controller
 can observe a genuine zero and enforce its cooldown. State is intentionally
