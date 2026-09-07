@@ -67,7 +67,7 @@ pub struct Config {
 
     /// Require a controller reservation before any data route is installed.
     #[serde(default)]
-    pub project_x_allocation_only: bool,
+    pub reservation_only: bool,
 }
 
 /// Default endpoint query configuration
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn test_default_endpoint_config() {
         let mut label_selector = HashMap::new();
-        label_selector.insert("agones.dev/fleet".to_string(), "m-tutorial".to_string());
+        label_selector.insert("agones.dev/fleet".to_string(), "tutorial".to_string());
 
         let config = Config {
             query_port: 9000,
@@ -290,7 +290,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            project_x_allocation_only: false,
+            reservation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_default_endpoint_without_status_query() {
         let mut label_selector = HashMap::new();
-        label_selector.insert("agones.dev/fleet".to_string(), "m-tutorial".to_string());
+        label_selector.insert("agones.dev/fleet".to_string(), "tutorial".to_string());
 
         let config = Config {
             query_port: 9000,
@@ -309,7 +309,7 @@ mod tests {
             data_ports: None,
             default_endpoint: DefaultEndpoint {
                 resource_type: "gameserver".to_string(),
-                namespace: "starx".to_string(),
+                namespace: "game-servers".to_string(),
                 label_selector: Some(label_selector),
                 annotation_selector: None,
                 status_query: None, // No status filtering
@@ -319,12 +319,12 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            project_x_allocation_only: false,
+            reservation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
         assert_eq!(endpoint.resource_type, "gameserver");
-        assert_eq!(endpoint.namespace, "starx");
+        assert_eq!(endpoint.namespace, "game-servers");
         assert!(endpoint.status_query.is_none());
     }
 
@@ -346,7 +346,7 @@ mod tests {
             control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            project_x_allocation_only: false,
+            reservation_only: false,
         };
 
         let magic_bytes = config.get_magic_bytes().unwrap();

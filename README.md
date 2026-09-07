@@ -19,7 +19,7 @@ A Kubernetes-native, high-performance stateful UDP/TCP proxy for dynamic routing
 - **[Testing Guide](Docs/Testing.md)** - Unit, integration, and load testing
 - **[Quick Reference](Docs/QuickReference.md)** - Commands and API reference
 - **[Project Summary](Docs/ProjectSummary.md)** - Implementation status
-- **[Project X routing](Docs/ProjectX.md)** - Exact-Pod allocation and drain contract
+- **[Reservation controller routing](Docs/ReservationController.md)** - Exact-Pod allocation and drain contract
 - **[Changelog](Docs/Changelog.md)** - Version history
 
 ## What Problem Does This Solve?
@@ -127,7 +127,7 @@ kubectl set image deployment/udp-director \
 
 ```bash
 # Phase 1: Query for backend (session established automatically)
-echo '{"resourceType":"gameserver","namespace":"starx","labelSelector":{"agones.dev/fleet":"m-tutorial"},"statusQuery":{"jsonPath":"status.state","expectedValue":"Ready"}}' | nc <LoadBalancer-IP> 9000
+echo '{"resourceType":"gameserver","namespace":"game-servers","labelSelector":{"agones.dev/fleet":"tutorial"},"statusQuery":{"jsonPath":"status.state","expectedValue":"Ready"}}' | nc <LoadBalancer-IP> 9000
 # Response: {"token":"550e8400-...","address":"10.244.1.44","ports":{"game-udp":7777,"game-tcp":7777}}
 # Session is now established for your client IP:Port
 

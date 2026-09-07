@@ -129,8 +129,6 @@ fn reset_session(socket: &UdpSocket, new_token: &str) -> Result<(), Box<dyn std:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_control_packet_format() {
         let magic_bytes = hex::decode("FFFFFFFF5245534554").unwrap();

@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: udp-director-config
-  namespace: starx
+  namespace: game-servers
 data:
   config.yaml: |
     # UDP Director Configuration - Multi-Port Pod Routing
@@ -25,13 +25,13 @@ data:
 
     # Default endpoint - targets pods with specific labels
     defaultEndpoint:
-      resourceType: "starx-pod"
-      namespace: "starx"
+      resourceType: "game-server-pod"
+      namespace: "game-servers"
       
       # Labels: Static configuration (server-side filtering)
       labelSelector:
-        app: "starx-test"
-        map: "m-tutorial"
+        app: "demo-game-server"
+        map: "tutorial"
       
       # Annotations: Dynamic operational data (client-side filtering)
       # Uncomment to filter by dynamic values
@@ -46,7 +46,7 @@ data:
 
     # Resource query mapping with multi-port support
     resourceQueryMapping:
-      starx-pod:
+      game-server-pod:
         group: ""
         version: "v1"
         resource: "pods"

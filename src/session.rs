@@ -119,10 +119,10 @@ pub struct Session {
     pub last_activity: Instant,
     /// Dedicated UDP sockets keyed by (proxy port, client source port).
     /// Keeping client sockets isolated prevents overlapping connections from the
-    /// same IP (for example during Unreal ClientTravel) from sharing a backend
+    /// same IP (for example during application-level travel) from sharing a backend
     /// UDP flow and corrupting each other's packets.
     pub udp_sockets: HashMap<(u16, u16), SessionSocket>,
-    /// Exact Kubernetes Pod UID for controller-issued Project X routes.
+    /// Exact Kubernetes Pod UID for controller-issued reservation routes.
     pub pod_uid: Option<String>,
 }
 
@@ -348,8 +348,8 @@ impl SessionManager {
         );
     }
 
-    /// Install a route bound to one exact Project X Pod UID.
-    pub async fn upsert_project_x(
+    /// Install a route bound to one exact reservation target Pod UID.
+    pub async fn upsert_reservation_route(
         &self,
         client_addr: SocketAddr,
         target_ip: String,
@@ -368,11 +368,11 @@ impl SessionManager {
             .insert(pod_uid, OffsetDateTime::now_utc());
     }
 
-    /// Install a Project X route using the legacy IP key.
+    /// Install a reservation route using the legacy IP key.
     ///
     /// This exists only for compatibility with query-port clients whose TCP
     /// source port cannot match their subsequent gameplay UDP source port.
-    pub async fn upsert_project_x_legacy(
+    pub async fn upsert_reservation_legacy(
         &self,
         client_addr: SocketAddr,
         target_ip: String,
@@ -392,7 +392,7 @@ impl SessionManager {
     }
 
     /// Return the route count and last binding time, or `None` after an unknown restart.
-    pub fn project_x_route_status(&self, pod_uid: &str) -> Option<(usize, OffsetDateTime)> {
+    pub fn reservation_route_status(&self, pod_uid: &str) -> Option<(usize, OffsetDateTime)> {
         let last_new = *self.route_history.get(pod_uid)?;
         let active = self
             .sessions
@@ -638,13 +638,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_x_routes_are_exact_and_preserved_during_drain() {
+    async fn reservation_routes_are_exact_and_preserved_during_drain() {
         let manager = SessionManager::new(300);
         let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let mut ports = HashMap::new();
         ports.insert((7777, Protocol::Udp), 7777);
         manager
-            .upsert_project_x(
+            .upsert_reservation_route(
                 client_addr,
                 "10.0.0.1".to_string(),
                 ports,
@@ -654,7 +654,7 @@ mod tests {
 
         // Drain only blocks future controller reservations. The established
         // route remains pinned until its normal session timeout.
-        let (active, _) = manager.project_x_route_status("exact-pod-uid").unwrap();
+        let (active, _) = manager.reservation_route_status("exact-pod-uid").unwrap();
         assert_eq!(active, 1);
         assert_eq!(
             manager
@@ -666,17 +666,17 @@ mod tests {
         );
         assert!(
             manager
-                .project_x_route_status("different-pod-uid")
+                .reservation_route_status("different-pod-uid")
                 .is_none()
         );
     }
 
     #[tokio::test]
-    async fn project_x_route_history_reports_zero_after_route_ends() {
+    async fn reservation_route_history_reports_zero_after_route_ends() {
         let manager = SessionManager::new(300);
         let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         manager
-            .upsert_project_x(
+            .upsert_reservation_route(
                 client_addr,
                 "10.0.0.1".to_string(),
                 HashMap::new(),
@@ -685,12 +685,12 @@ mod tests {
             .await;
         manager.clear_all().await;
 
-        let (active, _) = manager.project_x_route_status("pod-uid").unwrap();
+        let (active, _) = manager.reservation_route_status("pod-uid").unwrap();
         assert_eq!(active, 0);
     }
 
     #[tokio::test]
-    async fn project_x_routes_are_isolated_by_exact_socket_behind_one_nat() {
+    async fn reservation_routes_are_isolated_by_exact_socket_behind_one_nat() {
         let manager = SessionManager::new(300);
         let first: SocketAddr = "203.0.113.10:40001".parse().unwrap();
         let second: SocketAddr = "203.0.113.10:40002".parse().unwrap();
@@ -698,7 +698,7 @@ mod tests {
         ports.insert((7777, Protocol::Udp), 7777);
 
         manager
-            .upsert_project_x(
+            .upsert_reservation_route(
                 first,
                 "10.0.0.1".to_string(),
                 ports.clone(),
@@ -706,7 +706,7 @@ mod tests {
             )
             .await;
         manager
-            .upsert_project_x(second, "10.0.0.2".to_string(), ports, "pod-two".to_string())
+            .upsert_reservation_route(second, "10.0.0.2".to_string(), ports, "pod-two".to_string())
             .await;
 
         assert_eq!(manager.get_by_addr(&first).unwrap().target_ip, "10.0.0.1");
@@ -715,11 +715,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_x_route_state_is_unknown_after_restart() {
+    async fn reservation_route_state_is_unknown_after_restart() {
         let manager = SessionManager::new(300);
         assert!(
             manager
-                .project_x_route_status("pod-from-before-restart")
+                .reservation_route_status("pod-from-before-restart")
                 .is_none()
         );
     }

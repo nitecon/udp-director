@@ -11,11 +11,11 @@ use tracing::{debug, error, info, warn};
 use crate::config::{Config, DataPortConfig, Protocol};
 use crate::k8s_client::K8sClient;
 use crate::load_balancer::LoadBalancer;
-use crate::project_x::ProjectXRouter;
+use crate::reservation_controller::ReservationRouter;
 use crate::session::SessionManager;
 use crate::token_cache::TokenCache;
 
-const PROJECT_X_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+const RESERVATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Cached default endpoint target with multi-port support
 #[derive(Clone, Debug)]
@@ -34,8 +34,8 @@ pub struct DataProxy {
     k8s_client: K8sClient,
     default_endpoint_cache: Arc<RwLock<Option<DefaultEndpointCache>>>,
     load_balancer: LoadBalancer,
-    project_x_router: Option<ProjectXRouter>,
-    pending_project_x_setups: Arc<DashMap<SocketAddr, Arc<Notify>>>,
+    reservation_router: Option<ReservationRouter>,
+    pending_reservation_setups: Arc<DashMap<SocketAddr, Arc<Notify>>>,
 }
 
 /// Shared cache for default endpoint that can be invalidated
@@ -72,7 +72,7 @@ impl DataProxy {
         config: Config,
         k8s_client: K8sClient,
         cache_handle: DefaultEndpointCacheHandle,
-        project_x_router: Option<ProjectXRouter>,
+        reservation_router: Option<ReservationRouter>,
     ) -> Self {
         let data_ports = config.get_data_ports();
         let lb_config = config.get_load_balancing();
@@ -86,8 +86,8 @@ impl DataProxy {
             k8s_client,
             default_endpoint_cache: cache_handle.get_cache(),
             load_balancer,
-            project_x_router,
-            pending_project_x_setups: Arc::new(DashMap::new()),
+            reservation_router,
+            pending_reservation_setups: Arc::new(DashMap::new()),
         }
     }
 
@@ -145,18 +145,18 @@ impl DataProxy {
                     let socket_clone = socket.clone();
                     let proxy = self.clone();
 
-                    let is_project_x_setup = proxy.config.project_x_allocation_only
-                        && proxy.is_control_packet(&packet_data)?;
-                    if is_project_x_setup {
-                        if proxy.pending_project_x_setups.contains_key(&client_addr) {
+                    let is_reservation_setup =
+                        proxy.config.reservation_only && proxy.is_control_packet(&packet_data)?;
+                    if is_reservation_setup {
+                        if proxy.pending_reservation_setups.contains_key(&client_addr) {
                             warn!(
-                                "Ignoring concurrent Project X setup packet from {}",
+                                "Ignoring concurrent reservation setup packet from {}",
                                 client_addr
                             );
                             continue;
                         }
                         proxy
-                            .pending_project_x_setups
+                            .pending_reservation_setups
                             .insert(client_addr, Arc::new(Notify::new()));
                     }
 
@@ -164,8 +164,8 @@ impl DataProxy {
                         let result = proxy
                             .handle_udp_packet(socket_clone, client_addr, packet_data, proxy_port)
                             .await;
-                        if is_project_x_setup {
-                            proxy.complete_project_x_setup(&client_addr);
+                        if is_reservation_setup {
+                            proxy.complete_reservation_setup(&client_addr);
                         }
                         if let Err(e) = result {
                             error!(
@@ -242,19 +242,19 @@ impl DataProxy {
     }
 
     async fn handle_udp_control_packet(&self, client_addr: SocketAddr, token: &str) -> Result<()> {
-        if self.config.project_x_allocation_only {
+        if self.config.reservation_only {
             let router = self
-                .project_x_router
+                .reservation_router
                 .as_ref()
-                .context("Project X allocation routing is not configured")?;
+                .context("Reservation-controller routing is not configured")?;
             tokio::time::timeout(
-                PROJECT_X_SETUP_TIMEOUT,
+                RESERVATION_SETUP_TIMEOUT,
                 router.bind_socket(token, client_addr, &self.config),
             )
             .await
-            .context("Project X gameplay socket setup timed out")??;
+            .context("Reservation gameplay socket setup timed out")??;
             info!(
-                "Project X gameplay socket route established for {}",
+                "Reservation gameplay socket route established for {}",
                 client_addr
             );
             return Ok(());
@@ -272,23 +272,23 @@ impl DataProxy {
         Ok(())
     }
 
-    fn complete_project_x_setup(&self, client_addr: &SocketAddr) {
-        if let Some((_, notify)) = self.pending_project_x_setups.remove(client_addr) {
+    fn complete_reservation_setup(&self, client_addr: &SocketAddr) {
+        if let Some((_, notify)) = self.pending_reservation_setups.remove(client_addr) {
             notify.notify_waiters();
         }
     }
 
-    async fn wait_for_project_x_setup(&self, client_addr: &SocketAddr) {
+    async fn wait_for_reservation_setup(&self, client_addr: &SocketAddr) {
         loop {
             let Some(notify) = self
-                .pending_project_x_setups
+                .pending_reservation_setups
                 .get(client_addr)
                 .map(|entry| entry.clone())
             else {
                 return;
             };
             let notified = notify.notified();
-            if !self.pending_project_x_setups.contains_key(client_addr) {
+            if !self.pending_reservation_setups.contains_key(client_addr) {
                 return;
             }
             notified.await;
@@ -308,7 +308,7 @@ impl DataProxy {
         let session = self.session_manager.get_by_addr(&client_addr);
 
         if session.is_none() {
-            if self.config.project_x_allocation_only {
+            if self.config.reservation_only {
                 anyhow::bail!("controller allocation required before TCP data");
             }
             // No session - establish default route
@@ -362,18 +362,18 @@ impl DataProxy {
         packet_data: Vec<u8>,
         proxy_port: u16,
     ) -> Result<()> {
-        if self.config.project_x_allocation_only {
-            self.wait_for_project_x_setup(&client_addr).await;
+        if self.config.reservation_only {
+            self.wait_for_reservation_setup(&client_addr).await;
         }
 
-        // Exact Project X routes take precedence over legacy IP routes.
+        // Exact reservation routes take precedence over legacy IP routes.
         if self.session_manager.get_by_addr(&client_addr).is_some() {
             // Session exists - get or create dedicated socket and forward packet
             self.proxy_packet_bidirectional(socket, client_addr, packet_data, proxy_port)
                 .await?;
             self.session_manager.touch_by_addr(&client_addr);
         } else {
-            if self.config.project_x_allocation_only {
+            if self.config.reservation_only {
                 anyhow::bail!("controller allocation required before UDP data");
             }
             // No session exists - establish default route for this client
@@ -732,8 +732,8 @@ impl Clone for DataProxy {
             k8s_client: self.k8s_client.clone(),
             default_endpoint_cache: self.default_endpoint_cache.clone(),
             load_balancer: self.load_balancer.clone(),
-            project_x_router: self.project_x_router.clone(),
-            pending_project_x_setups: self.pending_project_x_setups.clone(),
+            reservation_router: self.reservation_router.clone(),
+            pending_reservation_setups: self.pending_reservation_setups.clone(),
         }
     }
 }
@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn project_x_setup_packet_matches_unreal_wire_format() {
+    fn reservation_setup_packet_matches_control_wire_format() {
         let magic_bytes = hex::decode("FFFFFFFF5245534554").unwrap();
         let mut packet = magic_bytes.clone();
         packet.extend_from_slice(b"controller-reservation-token");

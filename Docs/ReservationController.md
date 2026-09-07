@@ -1,8 +1,8 @@
 [← Back to README](../README.md)
 
-# Project X exact-Pod routing
+# Reservation-controller exact-Pod routing
 
-Project X uses controller-issued, single-use allocation reservations instead of
+Deployments use controller-issued, single-use allocation reservations instead of
 Agones or client-selected Kubernetes resources. The public query listener
 accepts this request:
 
@@ -21,16 +21,27 @@ requires all of the following before creating the route:
 - the map and immutable build labels match the reservation; and
 - the Pod has an assigned Pod IP.
 
-Set `projectXAllocationOnly: true` in the mounted configuration to reject
+Set `reservationOnly: true` in the mounted configuration to reject
 legacy resource queries, token resets, and first-packet fallback routing. This
-is required for Project X deployments.
+is required for reservation-controller deployments.
+
+Configure the controller integration with environment variables:
+
+- `RESERVATION_CONTROLLER_URL` enables the integration and sets the controller
+  base URL.
+- `RESERVATION_CONTROLLER_TOKEN_FILE` selects the projected identity-token
+  file. It defaults to `/var/run/secrets/reservation-controller/token`.
+- `RESERVATION_ADMIN_PORT` selects the private health and route-status port. It
+  defaults to `8080`.
+- `RESERVATION_MAP_LABEL` and `RESERVATION_BUILD_LABEL` select the Pod label
+  keys used for exact-target verification. They default to `map` and `build`.
 
 ## Gameplay-socket setup datagram
 
-Project X clients bind a reservation to the public gameplay UDP socket by
+Clients bind a reservation to the public gameplay UDP socket by
 sending one setup datagram to the director's normal UDP data endpoint (for
 example, the advertised director address on port `7777`). The setup datagram
-must originate from the exact socket that will send Unreal gameplay packets:
+must originate from the exact socket that will send gameplay packets:
 
 ```text
 FF FF FF FF 52 45 53 45 54 <raw UTF-8 allocation token>
@@ -40,9 +51,9 @@ FF FF FF FF 52 45 53 45 54 <raw UTF-8 allocation token>
 The default magic is configured by
 `controlPacketMagicBytes: "FFFFFFFF5245534554"`. The allocation token starts
 at byte 9 and occupies the remainder of the datagram. The director consumes
-this control datagram; it is never forwarded to Unreal.
+this control datagram; it is never forwarded to the backend.
 
-Send the setup datagram immediately before the first Unreal handshake packet.
+Send the setup datagram immediately before the first gameplay handshake packet.
 The director orders subsequent packets from that same `SocketAddr` behind the
 controller reservation check, so the first handshake cannot overtake setup.
 The director allows the controller and Pod checks up to 10 seconds. There is no
@@ -53,16 +64,16 @@ request a fresh reservation instead.
 The controller defines reservation expiry. A malformed, expired, replayed, or
 unavailable-target reservation installs no route. If the gameplay socket
 already had an exact route, that route remains unchanged; otherwise subsequent
-gameplay is rejected while `projectXAllocationOnly` is enabled. Logs identify
+gameplay is rejected while `reservationOnly` is enabled. Logs identify
 the client socket and outcome but never include the allocation token.
 
-Exact Project X routes are keyed by the complete public `SocketAddr`, so two
+Exact reservation routes are keyed by the complete public `SocketAddr`, so two
 players behind one NAT address remain independent. Legacy query and reset
-clients continue to use IP-keyed sessions when `projectXAllocationOnly` is
+clients continue to use IP-keyed sessions when `reservationOnly` is
 false. In that compatibility mode, the same magic packet carries a director
 cache token and retains the historical IP-keyed reset behavior. The TCP
 `{"type":"allocation"}` request also remains available as an IP-keyed legacy
-bridge, but new Project X clients must use the gameplay-socket datagram.
+bridge, but new reservation clients must use the gameplay-socket datagram.
 
 ## Drain and route observations
 
@@ -80,12 +91,9 @@ Route history remains available after the final route ends, so the controller
 can observe a genuine zero and enforce its cooldown. State is intentionally
 memory-local. After a director restart, an unobserved Pod UID returns HTTP 503
 instead of guessing zero, which makes automatic Pod deletion fail closed. The
-Project X deployment therefore uses one replica until shared route state is
+deployment should therefore use one replica until shared route state is
 implemented.
 
-The regional image is published as
-`us-east4-docker.pkg.dev/nitecon-datacenter/starx/udp-director:<git-hash>`.
-Environment promotion assigns aliases outside this repository without changing
-the immutable image.
+Build and publish immutable images through the deployment's own release process.
 
 [← Back to README](../README.md)

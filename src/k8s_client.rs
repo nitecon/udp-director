@@ -28,26 +28,33 @@ impl K8sClient {
         Ok(Self { client })
     }
 
-    /// Verify that an allocation still names the exact Ready Project X Pod.
-    pub async fn verify_project_x_pod(
+    /// Verify that an allocation still names the exact Ready reservation target Pod.
+    pub async fn verify_reservation_pod(
         &self,
         namespace: &str,
         pod_name: &str,
         pod_uid: &str,
         map: &str,
         build: &str,
+        label_keys: (&str, &str),
     ) -> Result<String> {
         let pod = Api::<Pod>::namespaced(self.client.clone(), namespace)
             .get(pod_name)
             .await
             .with_context(|| format!("Failed to read allocated Pod {namespace}/{pod_name}"))?;
-        Self::validate_project_x_pod(&pod, pod_uid, map, build)?;
+        Self::validate_reservation_pod(&pod, pod_uid, map, build, label_keys)?;
         pod.status
             .and_then(|status| status.pod_ip)
             .context("allocated Pod has no IP address")
     }
 
-    fn validate_project_x_pod(pod: &Pod, pod_uid: &str, map: &str, build: &str) -> Result<()> {
+    fn validate_reservation_pod(
+        pod: &Pod,
+        pod_uid: &str,
+        map: &str,
+        build: &str,
+        label_keys: (&str, &str),
+    ) -> Result<()> {
         if pod.metadata.uid.as_deref() != Some(pod_uid) {
             anyhow::bail!("allocated Pod UID no longer matches");
         }
@@ -59,8 +66,8 @@ impl K8sClient {
             .labels
             .as_ref()
             .context("allocated Pod has no labels")?;
-        if labels.get("games.nitecon.org/map").map(String::as_str) != Some(map)
-            || labels.get("games.nitecon.org/build").map(String::as_str) != Some(build)
+        if labels.get(label_keys.0).map(String::as_str) != Some(map)
+            || labels.get(label_keys.1).map(String::as_str) != Some(build)
         {
             anyhow::bail!("allocated Pod labels do not match the reservation");
         }
@@ -504,7 +511,7 @@ mod tests {
             "spec": {
                 "containers": [
                     {
-                        "name": "starx",
+                        "name": "game-servers",
                         "ports": [
                             {
                                 "name": "game-udp",
@@ -527,7 +534,7 @@ mod tests {
 
         // Test array indexing
         let value = client.extract_json_path(&json, "spec.containers[0].name");
-        assert_eq!(value, Some(Value::String("starx".to_string())));
+        assert_eq!(value, Some(Value::String("game-servers".to_string())));
 
         let value = client.extract_json_path(&json, "spec.containers[0].ports[0].containerPort");
         assert_eq!(value, Some(Value::Number(7777.into())));
@@ -564,7 +571,7 @@ mod tests {
             "spec": {
                 "containers": [
                     {
-                        "name": "starx",
+                        "name": "game-servers",
                         "ports": [
                             {
                                 "name": "game-udp",
@@ -683,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn project_x_pod_validation_requires_exact_uid_ready_and_labels() {
+    fn reservation_pod_validation_requires_exact_uid_ready_and_labels() {
         let pod: Pod = serde_json::from_value(json!({
             "apiVersion": "v1",
             "kind": "Pod",
@@ -691,8 +698,8 @@ mod tests {
                 "name": "tutorial-0",
                 "uid": "exact-uid",
                 "labels": {
-                    "games.nitecon.org/map": "tutorial",
-                    "games.nitecon.org/build": "sha256:abc"
+                    "example.net/map": "tutorial",
+                    "example.net/build": "sha256:abc"
                 }
             },
             "status": {
@@ -704,15 +711,34 @@ mod tests {
         .unwrap();
 
         assert!(
-            K8sClient::validate_project_x_pod(&pod, "exact-uid", "tutorial", "sha256:abc").is_ok()
+            K8sClient::validate_reservation_pod(
+                &pod,
+                "exact-uid",
+                "tutorial",
+                "sha256:abc",
+                ("example.net/map", "example.net/build")
+            )
+            .is_ok()
         );
         assert!(
-            K8sClient::validate_project_x_pod(&pod, "replacement-uid", "tutorial", "sha256:abc")
-                .is_err()
+            K8sClient::validate_reservation_pod(
+                &pod,
+                "replacement-uid",
+                "tutorial",
+                "sha256:abc",
+                ("example.net/map", "example.net/build")
+            )
+            .is_err()
         );
         assert!(
-            K8sClient::validate_project_x_pod(&pod, "exact-uid", "wrong-map", "sha256:abc")
-                .is_err()
+            K8sClient::validate_reservation_pod(
+                &pod,
+                "exact-uid",
+                "wrong-map",
+                "sha256:abc",
+                ("example.net/map", "example.net/build")
+            )
+            .is_err()
         );
     }
 }

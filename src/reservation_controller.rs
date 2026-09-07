@@ -21,12 +21,14 @@ use crate::k8s_client::K8sClient;
 use crate::session::SessionManager;
 
 #[derive(Clone)]
-pub(crate) struct ProjectXRouter {
+pub(crate) struct ReservationRouter {
     controller_url: String,
     token_path: PathBuf,
     k8s_client: K8sClient,
     sessions: SessionManager,
     admin_port: u16,
+    map_label: String,
+    build_label: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,26 +50,29 @@ struct RouteStatus {
     last_new_route_at: String,
 }
 
-impl ProjectXRouter {
+impl ReservationRouter {
     pub(crate) fn from_env(
         k8s_client: K8sClient,
         sessions: SessionManager,
     ) -> Result<Option<Self>> {
-        let Ok(controller_url) = std::env::var("PROJECT_X_CONTROLLER_URL") else {
+        let Ok(controller_url) = std::env::var("RESERVATION_CONTROLLER_URL") else {
             return Ok(None);
         };
-        let token_path = std::env::var("PROJECT_X_CONTROLLER_TOKEN_FILE")
-            .unwrap_or_else(|_| "/var/run/secrets/starx/tokens/controller-token".to_string());
-        let admin_port = std::env::var("PROJECT_X_ADMIN_PORT")
+        let token_path = std::env::var("RESERVATION_CONTROLLER_TOKEN_FILE")
+            .unwrap_or_else(|_| "/var/run/secrets/reservation-controller/token".to_string());
+        let admin_port = std::env::var("RESERVATION_ADMIN_PORT")
             .unwrap_or_else(|_| "8080".to_string())
             .parse()
-            .context("PROJECT_X_ADMIN_PORT must be a TCP port")?;
+            .context("RESERVATION_ADMIN_PORT must be a TCP port")?;
         Ok(Some(Self {
             controller_url: controller_url.trim_end_matches('/').to_string(),
             token_path: PathBuf::from(token_path),
             k8s_client,
             sessions,
             admin_port,
+            map_label: std::env::var("RESERVATION_MAP_LABEL").unwrap_or_else(|_| "map".to_string()),
+            build_label: std::env::var("RESERVATION_BUILD_LABEL")
+                .unwrap_or_else(|_| "build".to_string()),
         }))
     }
 
@@ -104,12 +109,13 @@ impl ProjectXRouter {
         Self::validate_reservation(&reservation, OffsetDateTime::now_utc())?;
         let target_ip = self
             .k8s_client
-            .verify_project_x_pod(
+            .verify_reservation_pod(
                 &reservation.namespace,
                 &reservation.pod_name,
                 &reservation.pod_uid,
                 &reservation.map,
                 &reservation.build,
+                (&self.map_label, &self.build_label),
             )
             .await?;
         let port_mappings = config
@@ -119,11 +125,21 @@ impl ProjectXRouter {
             .collect::<HashMap<(u16, Protocol), u16>>();
         if exact_socket {
             self.sessions
-                .upsert_project_x(client_addr, target_ip, port_mappings, reservation.pod_uid)
+                .upsert_reservation_route(
+                    client_addr,
+                    target_ip,
+                    port_mappings,
+                    reservation.pod_uid,
+                )
                 .await;
         } else {
             self.sessions
-                .upsert_project_x_legacy(client_addr, target_ip, port_mappings, reservation.pod_uid)
+                .upsert_reservation_legacy(
+                    client_addr,
+                    target_ip,
+                    port_mappings,
+                    reservation.pod_uid,
+                )
                 .await;
         }
         Ok(())
@@ -198,7 +214,10 @@ impl ProjectXRouter {
 
     pub(crate) async fn run_admin_server(self) -> Result<()> {
         let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], self.admin_port))).await?;
-        info!("Project X admin server listening on {}", self.admin_port);
+        info!(
+            "Reservation controller admin server listening on {}",
+            self.admin_port
+        );
         loop {
             let (stream, _) = listener.accept().await?;
             let router = self.clone();
@@ -213,7 +232,7 @@ impl ProjectXRouter {
                     )
                     .await;
                 if let Err(error) = result {
-                    error!("Project X admin connection failed: {}", error);
+                    error!("Reservation controller admin connection failed: {}", error);
                 }
             });
         }
@@ -237,7 +256,8 @@ impl ProjectXRouter {
             );
         }
         let pod_uid = &path[prefix.len()..path.len() - suffix.len()];
-        let Some((active_routes, last_new)) = self.sessions.project_x_route_status(pod_uid) else {
+        let Some((active_routes, last_new)) = self.sessions.reservation_route_status(pod_uid)
+        else {
             return Self::response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 Bytes::from("route state unknown"),
@@ -281,18 +301,21 @@ mod tests {
 
     #[test]
     fn rejects_malformed_allocation_tokens() {
-        assert!(ProjectXRouter::validate_allocation_token("").is_err());
-        assert!(ProjectXRouter::validate_allocation_token("../token").is_err());
-        assert!(ProjectXRouter::validate_allocation_token("valid-token").is_ok());
+        assert!(ReservationRouter::validate_allocation_token("").is_err());
+        assert!(ReservationRouter::validate_allocation_token("../token").is_err());
+        assert!(ReservationRouter::validate_allocation_token("valid-token").is_ok());
     }
 
     #[test]
     fn rejects_expired_allocations() {
         let now = OffsetDateTime::now_utc();
-        assert!(ProjectXRouter::validate_reservation(&reservation(now), now).is_err());
+        assert!(ReservationRouter::validate_reservation(&reservation(now), now).is_err());
         assert!(
-            ProjectXRouter::validate_reservation(&reservation(now + time::Duration::SECOND), now)
-                .is_ok()
+            ReservationRouter::validate_reservation(
+                &reservation(now + time::Duration::SECOND),
+                now
+            )
+            .is_ok()
         );
     }
 
@@ -303,7 +326,7 @@ mod tests {
                 "podUid":"pod-uid",
                 "namespace":"project-x",
                 "podName":"tutorial-0",
-                "map":"m-tutorial",
+                "map":"tutorial",
                 "build":"506f5559",
                 "expiresAt":"2026-09-02T03:00:00.123456789Z"
             }"#,
@@ -314,7 +337,7 @@ mod tests {
 
     #[test]
     fn allocation_controller_receives_exact_gameplay_socket() {
-        let request = ProjectXRouter::consume_request(
+        let request = ReservationRouter::consume_request(
             "http://controller/v1alpha1/reservations/token/consume"
                 .parse()
                 .unwrap(),

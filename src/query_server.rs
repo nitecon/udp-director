@@ -7,7 +7,7 @@ use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::k8s_client::{K8sClient, StatusQuery};
-use crate::project_x::ProjectXRouter;
+use crate::reservation_controller::ReservationRouter;
 use crate::session::SessionManager;
 use crate::token_cache::{TokenCache, TokenTarget};
 
@@ -25,7 +25,7 @@ pub enum QueryRequest {
     },
     /// Reset an existing session with a new token
     SessionReset { token: String },
-    /// Consume a trusted Project X controller reservation.
+    /// Consume a trusted reservation-controller token.
     Allocation { token: String },
 }
 
@@ -62,7 +62,7 @@ pub struct QueryServer {
     token_cache: TokenCache,
     session_manager: SessionManager,
     config: Config,
-    project_x_router: Option<ProjectXRouter>,
+    reservation_router: Option<ReservationRouter>,
 }
 
 impl QueryServer {
@@ -73,7 +73,7 @@ impl QueryServer {
         token_cache: TokenCache,
         session_manager: SessionManager,
         config: Config,
-        project_x_router: Option<ProjectXRouter>,
+        reservation_router: Option<ReservationRouter>,
     ) -> Self {
         Self {
             port,
@@ -81,7 +81,7 @@ impl QueryServer {
             token_cache,
             session_manager,
             config,
-            project_x_router,
+            reservation_router,
         }
     }
 
@@ -167,7 +167,7 @@ impl QueryServer {
                 label_selector,
                 annotation_selector,
             } => {
-                if self.config.project_x_allocation_only {
+                if self.config.reservation_only {
                     return QueryResponse::Error {
                         error: "controller allocation required".to_string(),
                     };
@@ -183,14 +183,14 @@ impl QueryServer {
                 .await
             }
             QueryRequest::SessionReset { token } => {
-                if self.config.project_x_allocation_only {
+                if self.config.reservation_only {
                     return QueryResponse::Error {
                         error: "controller allocation required".to_string(),
                     };
                 }
                 self.process_session_reset(token, client_addr).await
             }
-            QueryRequest::Allocation { token } => match &self.project_x_router {
+            QueryRequest::Allocation { token } => match &self.reservation_router {
                 Some(router) => match router.bind(&token, client_addr, &self.config).await {
                     Ok(()) => QueryResponse::Success { token },
                     Err(error) => QueryResponse::Error {
@@ -198,7 +198,7 @@ impl QueryServer {
                     },
                 },
                 None => QueryResponse::Error {
-                    error: "Project X allocation routing is not configured".to_string(),
+                    error: "Reservation-controller routing is not configured".to_string(),
                 },
             },
         }
@@ -535,7 +535,7 @@ impl Clone for QueryServer {
             token_cache: self.token_cache.clone(),
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
-            project_x_router: self.project_x_router.clone(),
+            reservation_router: self.reservation_router.clone(),
         }
     }
 }

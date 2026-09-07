@@ -39,4 +39,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: udp-director
-    namespace: starx  # Change this to your target namespace
+    namespace: game-servers  # Change this to your target namespace

@@ -47,7 +47,7 @@ ports:
 
 **Example Query**:
 ```json
-{"resourceType": "starx-pod", "namespace": "starx", "labelSelector": {"app": "starx-test", "map": "m-tutorial"}}
+{"resourceType": "game-server-pod", "namespace": "game-servers", "labelSelector": {"app": "demo-game-server", "map": "tutorial"}}
 ```
 
 ---
@@ -115,24 +115,24 @@ ports:
 
 ## Deployment Steps
 
-### Complete Example (starx namespace)
+### Complete Example (game-servers namespace)
 
 ```bash
 # 1. Create namespace
-kubectl create namespace starx
+kubectl create namespace game-servers
 
 # 2. Apply RBAC (REQUIRED - grants pod access permissions)
-kubectl apply -f rbac.yaml -n starx
+kubectl apply -f rbac.yaml -n game-servers
 
 # 3. Apply ConfigMap (choose one based on your needs)
-kubectl apply -f configmap-pods-multiport.yaml -n starx
+kubectl apply -f configmap-pods-multiport.yaml -n game-servers
 
 # 4. Deploy UDP Director
-kubectl apply -f deployment.yaml -n starx
+kubectl apply -f deployment.yaml -n game-servers
 
 # 5. Verify deployment
-kubectl get pods -n starx
-kubectl logs -f deployment/udp-director -n starx
+kubectl get pods -n game-servers
+kubectl logs -f deployment/udp-director -n game-servers
 ```
 
 ### Important: RBAC Configuration
@@ -148,7 +148,7 @@ The RBAC configuration **must** be applied before deployment. It grants UDP Dire
 subjects:
   - kind: ServiceAccount
     name: udp-director
-    namespace: starx  # Change this to your namespace
+    namespace: game-servers  # Change this to your namespace
 ```
 
 ### Switching ConfigMaps

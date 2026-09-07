@@ -6,35 +6,35 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: starx
+  name: game-servers
 
 ---
 # 2. Deploy the game server application
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: starx-test-deployment
-  namespace: starx
+  name: demo-game-server-deployment
+  namespace: game-servers
   labels:
-    app: starx-test
-    map: m-tutorial
+    app: demo-game-server
+    map: tutorial
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: starx-test
+      app: demo-game-server
   template:
     metadata:
       labels:
-        app: starx-test
-        map: m-tutorial
+        app: demo-game-server
+        map: tutorial
     spec:
       containers:
-        - name: starx
-          image: registry.nitecon.net/starx/starx:latest
+        - name: demo-game-server
+          image: registry.example.com/games/demo-server:latest
           env:
             - name: MAP
-              value: "/Game/Levels/M_Tutorial"
+              value: "tutorial"
           ports:
             - name: game-udp
               containerPort: 7777
@@ -57,14 +57,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: starx-test-service
-  namespace: starx
+  name: demo-game-server-service
+  namespace: game-servers
   labels:
-    app: starx-test
+    app: demo-game-server
 spec:
   type: LoadBalancer
   selector:
-    app: starx-test
+    app: demo-game-server
   ports:
     - name: game-udp
       port: 7777
@@ -82,7 +82,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: udp-director
-  namespace: starx
+  namespace: game-servers
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -109,7 +109,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: udp-director
-    namespace: starx
+    namespace: game-servers
 
 ---
 # 5. Apply the pod-based ConfigMap
@@ -117,7 +117,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: udp-director-config
-  namespace: starx
+  namespace: game-servers
 data:
   config.yaml: |
     queryPort: 9000
@@ -128,18 +128,18 @@ data:
 
     # Default endpoint targets pods with specific labels
     defaultEndpoint:
-      resourceType: "starx-pod"
-      namespace: "starx"
+      resourceType: "game-server-pod"
+      namespace: "game-servers"
       labelSelector:
-        app: "starx-test"
-        map: "m-tutorial"
+        app: "demo-game-server"
+        map: "tutorial"
       statusQuery:
         jsonPath: "status.phase"
         expectedValues:
           - "Running"
 
     resourceQueryMapping:
-      starx-pod:
+      game-server-pod:
         group: ""
         version: "v1"
         resource: "pods"
@@ -152,7 +152,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: udp-director
-  namespace: starx
+  namespace: game-servers
   labels:
     app: udp-director
 spec:
@@ -198,7 +198,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: udp-director-service
-  namespace: starx
+  namespace: game-servers
 spec:
   type: LoadBalancer
   selector:
@@ -220,11 +220,11 @@ spec:
 #    kubectl apply -f example-pod-deployment.yaml
 #
 # 2. Get the UDP Director service external IP:
-#    kubectl get svc udp-director-service -n starx
+#    kubectl get svc udp-director-service -n game-servers
 #
 # 3. Query for available pods:
 #    # Connect to the query port (9000) and send a JSON query:
-#    echo '{"resourceType":"starx-pod","namespace":"starx","labelSelector":{"app":"starx-test"}}' | nc <EXTERNAL-IP> 9000
+#    echo '{"resourceType":"game-server-pod","namespace":"game-servers","labelSelector":{"app":"demo-game-server"}}' | nc <EXTERNAL-IP> 9000
 #
 # 4. The response will include a token and the pod's IP:port
 #
@@ -233,19 +233,19 @@ spec:
 # Advanced Queries:
 #
 # - Target pods by map label:
-#   {"resourceType":"starx-pod","namespace":"starx","labelSelector":{"map":"m-tutorial"}}
+#   {"resourceType":"game-server-pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}
 #
 # - Target TCP port instead of UDP:
-#   {"resourceType":"starx-pod-tcp","namespace":"starx","labelSelector":{"app":"starx-test"}}
-#   (requires adding starx-pod-tcp to resourceQueryMapping with portName: "game-tcp")
+#   {"resourceType":"game-server-pod-tcp","namespace":"game-servers","labelSelector":{"app":"demo-game-server"}}
+#   (requires adding game-server-pod-tcp to resourceQueryMapping with portName: "game-tcp")
 #
 # Monitoring:
 #
 # - Check pod status:
-#   kubectl get pods -n starx -l app=starx-test
+#   kubectl get pods -n game-servers -l app=demo-game-server
 #
 # - View UDP Director logs:
-#   kubectl logs -n starx -l app=udp-director -f
+#   kubectl logs -n game-servers -l app=udp-director -f
 #
 # - Describe a pod to see its IP and ports:
-#   kubectl describe pod -n starx <pod-name>
+#   kubectl describe pod -n game-servers <pod-name>

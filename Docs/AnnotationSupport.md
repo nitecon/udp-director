@@ -35,7 +35,7 @@ UDP Director supports both filtering mechanisms:
   "resourceType": "gameserver",
   "namespace": "game-servers",
   "labelSelector": {
-    "agones.dev/fleet": "m-tutorial",
+    "agones.dev/fleet": "tutorial",
     "map": "de_dust2",
     "maxPlayers": "64"
   },
@@ -59,7 +59,7 @@ defaultEndpoint:
   
   # Static metadata - server-side filtering
   labelSelector:
-    agones.dev/fleet: "m-tutorial"
+    agones.dev/fleet: "tutorial"
     map: "de_dust2"
     maxPlayers: "64"
   
@@ -169,7 +169,7 @@ echo '{
   "resourceType": "gameserver",
   "namespace": "game-servers",
   "labelSelector": {
-    "agones.dev/fleet": "m-tutorial",
+    "agones.dev/fleet": "tutorial",
     "map": "de_dust2"
   },
   "annotationSelector": {
@@ -203,7 +203,7 @@ metadata:
   name: game-server-abc123
   labels:
     # Static configuration
-    agones.dev/fleet: "m-tutorial"
+    agones.dev/fleet: "tutorial"
     map: "de_dust2"
     maxPlayers: "64"
     gameMode: "competitive"

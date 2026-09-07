@@ -156,7 +156,7 @@ scrape_configs:
       - role: pod
         namespaces:
           names:
-            - starx
+            - game-servers
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app]
         action: keep
@@ -177,7 +177,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: udp-director
-  namespace: starx
+  namespace: game-servers
 spec:
   selector:
     matchLabels:
@@ -292,7 +292,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: udp-director-metrics
-  namespace: starx
+  namespace: game-servers
   labels:
     app: udp-director
 spec:
@@ -328,7 +328,7 @@ spec:
 
 ```bash
 # Check metrics endpoint
-kubectl port-forward -n starx deployment/udp-director 9090:9090
+kubectl port-forward -n game-servers deployment/udp-director 9090:9090
 curl http://localhost:9090/metrics
 
 # Check health endpoint
