@@ -16,7 +16,7 @@ lazy_static! {
     pub static ref TOTAL_SESSIONS: IntCounterVec = register_int_counter_vec!(
         "udp_director_total_sessions",
         "Total number of sessions created",
-        &["session_type"] // "token", "default"
+        &["session_type"] // "query", "default"
     )
     .unwrap();
 
@@ -78,20 +78,6 @@ lazy_static! {
         "Duration of query processing",
         &["status"],
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
-    )
-    .unwrap();
-
-    // Token cache metrics
-    pub static ref TOKEN_CACHE_SIZE: IntGauge = register_int_gauge!(
-        "udp_director_token_cache_size",
-        "Number of tokens in cache"
-    )
-    .unwrap();
-
-    pub static ref TOKEN_CACHE_HITS: IntCounterVec = register_int_counter_vec!(
-        "udp_director_token_cache_hits_total",
-        "Token cache hits/misses",
-        &["result"] // "hit", "miss"
     )
     .unwrap();
 
@@ -223,13 +209,6 @@ pub fn record_query_request(status: &str, duration_seconds: f64) {
         .observe(duration_seconds);
 }
 
-/// Record token cache access
-#[allow(dead_code)]
-pub fn record_token_cache_access(hit: bool) {
-    let result = if hit { "hit" } else { "miss" };
-    TOKEN_CACHE_HITS.with_label_values(&[result]).inc();
-}
-
 /// Record Kubernetes query
 #[allow(dead_code)]
 pub fn record_k8s_query(resource_type: &str, status: &str, duration_seconds: f64) {
@@ -268,10 +247,10 @@ mod tests {
     #[test]
     fn test_metrics_recording() {
         // Test session metrics
-        record_session_start("token");
+        record_session_start("query");
         assert_eq!(ACTIVE_SESSIONS.get(), 1);
 
-        record_session_end("token", 10.0);
+        record_session_end("query", 10.0);
         assert_eq!(ACTIVE_SESSIONS.get(), 0);
 
         // Test packet metrics
@@ -280,10 +259,6 @@ mod tests {
 
         // Test query metrics
         record_query_request("success", 0.05);
-
-        // Test token cache
-        record_token_cache_access(true);
-        record_token_cache_access(false);
 
         // Test K8s metrics
         record_k8s_query("gameserver", "success", 0.1);

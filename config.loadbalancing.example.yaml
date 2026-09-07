@@ -15,9 +15,7 @@ defaultEndpoint:
       - "Ready"
       - "Allocated"
 
-tokenTtlSeconds: 30
 sessionTimeoutSeconds: 300
-controlPacketMagicBytes: "FFFFFFFF5245534554"
 
 # Advanced load balancing with label-based arithmetic
 # This strategy routes traffic based on resource labels

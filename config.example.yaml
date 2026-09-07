@@ -1,75 +1,20 @@
-# Example configuration file for local development
-# Copy this to config.yaml and adjust as needed
-
-# Port for the Phase 1 TCP Query Server
+# Regional TCP query and UDP forwarding configuration.
 queryPort: 9000
-
-# Port for the Phase 2 TCP/UDP Data Proxy
 dataPort: 7777
-
-# Default endpoint query to use if no token is provided
-# Uses the same query structure as client queries for consistency
-defaultEndpoint:
-  resourceType: "gameserver"
-  namespace: "default"
-  labelSelector:
-    agones.dev/fleet: "default-fleet"
-  statusQuery:
-    jsonPath: "status.state"
-    expectedValues:
-      - "Ready"
-      - "Allocated"
-
-# How long a token is valid for lookup (in seconds)
-tokenTtlSeconds: 30
-
-# How long a data proxy session can be inactive before being torn down (in seconds)
 sessionTimeoutSeconds: 300
+characterLabelPrefix: characters.udp-director.io
+disconnectAnnotation: udp-director.io/disconnected-at
 
-# Magic byte sequence (as a hex string) that prefixes a "Control Packet"
-# This example is 4 bytes (0xFFFFFFFF) + "RESET" (0x5245534554)
-# You can customize this to any unique byte sequence
-controlPacketMagicBytes: "FFFFFFFF5245534554"
+defaultEndpoint:
+  resourceType: pod
+  namespace: game-servers
+  labelSelector:
+    app: game-server
 
-# Load balancing configuration (optional)
-# If not specified, defaults to "leastSessions" strategy
-loadBalancing:
-  # Strategy: "leastSessions" or "labelArithmetic"
-  type: "leastSessions"
-  
-  # For labelArithmetic strategy, specify the labels to use:
-  # type: "labelArithmetic"
-  # currentLabel: "currentUsers"  # Label containing current user count
-  # maxLabel: "maxUsers"          # Label containing maximum user count
-  # overlap: 2                    # Overlap allowance for concurrent proxies (default: 0)
-
-# Defines how client queries map to k8s resources
 resourceQueryMapping:
-  # Example 1: Agones GameServers (Direct Resource Approach)
-  gameserver:
-    # GVR (Group, Version, Resource) for the resource to query
-    group: "agones.dev"
-    version: "v1"
-    resource: "gameservers"
-    
-    # Direct resource approach - extract address and port from the resource itself
-    addressPath: "status.address"
-    portName: "default"
-
-  # Example 2: Custom Deployments (Service-Based Approach)
-  custom-deployment:
-    group: "apps.example.com"
-    version: "v1alpha1"
-    resource: "customdeployments"
-    
-    # Service-based approach - find a service linked to this resource
-    serviceSelectorLabel: "app.example.com/instance"
-    serviceTargetPortName: "udp-main"
-
-  # Example 3: Standard Kubernetes Pods (for testing)
   pod:
     group: ""
-    version: "v1"
-    resource: "pods"
-    serviceSelectorLabel: "app"
-    serviceTargetPortName: "game"
+    version: v1
+    resource: pods
+    addressPath: status.podIP
+    portName: game

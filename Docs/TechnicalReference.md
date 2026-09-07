@@ -4,202 +4,45 @@
 
 This document provides in-depth technical details for developers and operators working with UDP Director internals.
 
-**Version**: 1.3 (Rust Edition w/ Session Reset)  
+**Status**: Routing recovery in progress
 **Status**: Production Ready  
 **Target**: Cilium Service Mesh on Kubernetes
 
 ---
 
-## Table of Contents
+## Query and routing
 
-1. [Control Packet Protocol](#control-packet-protocol)
-2. [Session Management Internals](#session-management-internals)
-3. [Token Cache Implementation](#token-cache-implementation)
-4. [Kubernetes API Integration](#kubernetes-api-integration)
-5. [Performance Tuning](#performance-tuning)
-6. [Security Considerations](#security-considerations)
-7. [Advanced Configuration](#advanced-configuration)
-
----
-
-## Control Packet Protocol
-
-### Packet Format Specification
-
-**Control Packet Structure**:
-```
-[Magic Bytes (9 bytes)][Token (36 bytes)]
-```
-
-**Default Magic Bytes** (hex): `FFFFFFFF5245534554`
-- Decoded: `[0xFF, 0xFF, 0xFF, 0xFF, 'R', 'E', 'S', 'E', 'T']`
-- First 4 bytes: `0xFFFFFFFF` (unlikely to appear in normal game data)
-- Next 5 bytes: ASCII "RESET"
-
-**Token Format**: UUID v4 (36 bytes ASCII)
-- Example: `550e8400-e29b-41d4-a716-446655440000`
-
-### Packet Detection Algorithm
-
-```rust
-fn is_control_packet(packet: &[u8], magic_bytes: &[u8]) -> bool {
-    packet.len() >= magic_bytes.len() && 
-    packet.starts_with(magic_bytes)
-}
-```
-
-**Performance**: O(1) prefix check, < 100ns overhead per packet
-
-### Custom Magic Bytes
-
-You can customize the magic bytes to avoid conflicts:
-
-```yaml
-# Use a different sequence
-controlPacketMagicBytes: "DEADBEEF52535400"  # 8 bytes
-
-# Or longer for more uniqueness
-controlPacketMagicBytes: "FFFFFFFF52455345545F5632"  # "RESET_V2"
-```
-
-**Requirements**:
-- Must be valid hex string
-- Recommended: 8-16 bytes
-- Should not appear in normal application data
-- Must be consistent across all clients
-
----
+[Query API](QueryAPI.md) defines the TCP JSON contract, character lookup, Pod
+metadata, and unresolved integration boundaries. A successful query installs a
+forwarding route and returns `ready` with public director ports. Application
+traffic then goes directly through those ports without a control datagram.
 
 ## Session Management Internals
 
-### Session State Machine
+The restored query path keys the route by TCP peer IP. For UDP, each director
+port and client source port pair receives its own upstream socket, preserving
+the return path to the originating client socket. This does not provide distinct
+selected targets for players sharing one public IP; see the API document.
 
-```
-[No Session] 
-    │
-    ├─ First packet is valid token
-    │  └─> [Active Session] (Client → Target A)
-    │
-    └─ First packet is not token
-       └─> [Active Session] (Client → Default Endpoint)
+A subsequent successful query replaces the selected route. Background session
+cleanup expires inactive forwarding state according to `sessionTimeoutSeconds`.
+Forwarding inactivity is not an authoritative player disconnect and must not
+change character occupancy labels.
 
-[Active Session]
-    │
-    ├─ Receives data packet
-    │  └─> Forward to target, reset timeout
-    │
-    ├─ Receives control packet with valid token
-    │  └─> Update target to Target B, reset timeout
-    │
-    ├─ Receives control packet with invalid token
-    │  └─> Drop packet, log warning, keep existing session
-    │
-    └─ Inactive for sessionTimeoutSeconds
-       └─> [Session Cleaned Up]
-```
-
-### Data Structures
-
-**Session Entry**:
-```rust
-struct Session {
-    target_ip: String,
-    port_mappings: HashMap<(u16, Protocol), u16>,
-    last_activity: Instant,
-    udp_sockets: HashMap<(u16, u16), SessionSocket>,
-    // UDP socket key: (director proxy port, client source port)
-}
-```
-
-**Session Map**:
-```rust
-DashMap<IpAddr, Session>  // Client IP → active route
-```
-
-Route selection is keyed by client IP so a query socket and a later game socket
-can use different source ports while sharing the newly selected destination.
-Within that route, each `(proxy port, client source port)` gets a dedicated
-upstream UDP socket. This prevents overlapping old and new game sockets during
-travel from being multiplexed into the same backend UDP flow.
-
-**Cleanup Strategy**:
-- Background task runs every 30 seconds
-- Removes sessions inactive > `sessionTimeoutSeconds`
-- Lock-free concurrent access via DashMap
-
-### Memory Usage
-
-- **Per Session**: ~48 bytes (SocketAddr + Instant + overhead)
-- **1,000 sessions**: ~48 KB
-- **10,000 sessions**: ~480 KB
-- **Base overhead**: ~128 MB (runtime, caches, etc.)
-
----
-
-## Token Cache Implementation
-
-### Cache Architecture
-
-**Technology**: moka (high-performance, TTL-based cache)
-
-**Characteristics**:
-- Lock-free concurrent access
-- Automatic expiration (TTL)
-- O(1) lookup and insert
-- Memory-bounded
-
-### Token Generation
-
-```rust
-use uuid::Uuid;
-
-let token = Uuid::new_v4().to_string();
-// Example: "550e8400-e29b-41d4-a716-446655440000"
-```
-
-**Security Properties**:
-- 122 bits of randomness
-- Cryptographically secure RNG
-- Collision probability: negligible (< 10^-18)
-
-### TTL Behavior
-
-```
-T=0s:  Token generated, inserted into cache
-T=15s: Token still valid
-T=30s: Token expires, automatically removed
-T=31s: Lookup returns None
-```
-
-**Configuration**:
-```yaml
-tokenTTLSeconds: 30  # Adjust based on network latency
-```
-
-**Recommendations**:
-- LAN: 15-30 seconds
-- WAN: 30-60 seconds
-- High-latency: 60-120 seconds
-
----
+Character lookup reads Pod labels and disconnect timestamps. It excludes expired
+disconnected entries at 120 seconds; label mutation and removal belong to the
+controller's lifecycle contract.
 
 ## Kubernetes API Integration
 
 ### Resource Query Flow
 
-```
-1. Client sends query JSON
-2. Parse resourceType, namespace, filters
-3. Look up GVR from resourceQueryMapping
-4. Query K8s API: GET /apis/{group}/{version}/namespaces/{ns}/{resource}
-5. Apply label selector (server-side)
-6. Apply status query (client-side JSONPath)
-7. Select first matching resource
-8. Find Service with serviceSelectorLabel
-9. Extract clusterIP and port
-10. Generate token, cache target
-11. Return token to client
-```
+1. Parse the TCP JSON query and resolve its configured resource mapping.
+2. Query Kubernetes with the label selector and apply annotation/status filters.
+3. For core Pods, require Running, Ready, nonterminating state and a Pod IP.
+4. Select the first matching resource and extract its configured backend ports.
+5. Install forwarding for the client and return the resource name with public
+   director ports. A failed query does not install a new route.
 
 ### JSONPath Status Queries
 
@@ -375,25 +218,6 @@ resources:
 
 ## Security Considerations
 
-### Token Security
-
-**Threat Model**:
-- **Token Interception**: Tokens sent in plaintext over UDP
-- **Token Replay**: Attacker reuses captured token
-- **Token Guessing**: Attacker tries to guess valid tokens
-
-**Mitigations**:
-- Short TTL (30s default) limits replay window
-- UUIDv4 has 122 bits entropy (guessing infeasible)
-- Use Cilium encryption for network-level security
-- Tokens are single-use (consumed on first use)
-
-**Recommendations**:
-- Deploy in trusted network (VPC, private subnet)
-- Use Cilium WireGuard encryption
-- Implement client IP allowlisting (future)
-- Add HMAC signatures (future)
-
 ### RBAC Isolation
 
 **Principle**: Least privilege
@@ -459,7 +283,7 @@ UDP Director provides pre-configured ConfigMaps for common use cases:
 - Default data port: 7777
 
 **`k8s/configmap-pods-multiport.yaml`** - Multi-Port Pod Routing
-- Single token provides access to multiple ports
+- One TCP query installs the configured port mappings
 - Includes label and annotation filtering examples
 - Ideal for game servers with multiple service ports
 
@@ -600,34 +424,8 @@ readinessProbe:
 
 ## Monitoring and Observability
 
-### Logging
+See [Metrics](Metrics.md) for the implemented Prometheus metrics. Use forwarding
+and query logs to diagnose route selection and network failures. These proxy
+metrics do not establish authoritative player occupancy.
 
-**Levels**:
-- `error`: Critical failures
-- `warn`: Recoverable issues (invalid tokens, timeouts)
-- `info`: Normal operations (session created, token generated)
-- `debug`: Detailed flow (packet inspection, K8s queries)
-- `trace`: Very verbose (every packet)
-
-**Key Log Messages**:
-```
-INFO  Session established: 192.168.1.100:12345 -> 10.96.1.50:7777
-INFO  Session reset: 192.168.1.100:12345 -> 10.96.1.51:7777
-WARN  Invalid token in control packet from 192.168.1.100:12345
-INFO  Cleaned up 5 timed-out sessions. Active sessions: 42
-```
-
-### Metrics (Future)
-
-Planned Prometheus metrics:
-- `udp_director_queries_total` - Total queries received
-- `udp_director_queries_success` - Successful queries
-- `udp_director_sessions_active` - Current active sessions
-- `udp_director_sessions_created_total` - Total sessions created
-- `udp_director_sessions_reset_total` - Total session resets
-- `udp_director_packets_proxied_total` - Total packets proxied
-- `udp_director_query_duration_seconds` - Query latency histogram
-
----
-
-[← Back to README](../README.md)
+[Back to README](../README.md)

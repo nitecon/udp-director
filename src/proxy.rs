@@ -1,21 +1,15 @@
 use anyhow::{Context, Result};
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Notify, RwLock};
-use tracing::{debug, error, info, warn};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
 use crate::config::{Config, DataPortConfig, Protocol};
 use crate::k8s_client::K8sClient;
 use crate::load_balancer::LoadBalancer;
-use crate::reservation_controller::ReservationRouter;
 use crate::session::SessionManager;
-use crate::token_cache::TokenCache;
-
-const RESERVATION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Cached default endpoint target with multi-port support
 #[derive(Clone, Debug)]
@@ -25,17 +19,14 @@ pub(crate) struct DefaultEndpointCache {
     port_mappings: HashMap<(u16, Protocol), u16>,
 }
 
-/// Data Proxy for Phase 2 & 3 (TCP/UDP with session reset) - Multi-port support
+/// Data Proxy for TCP/UDP forwarding - Multi-port support
 pub struct DataProxy {
     data_ports: Vec<DataPortConfig>,
-    token_cache: TokenCache,
     session_manager: SessionManager,
     config: Config,
     k8s_client: K8sClient,
     default_endpoint_cache: Arc<RwLock<Option<DefaultEndpointCache>>>,
     load_balancer: LoadBalancer,
-    reservation_router: Option<ReservationRouter>,
-    pending_reservation_setups: Arc<DashMap<SocketAddr, Arc<Notify>>>,
 }
 
 /// Shared cache for default endpoint that can be invalidated
@@ -67,12 +58,10 @@ impl DefaultEndpointCacheHandle {
 impl DataProxy {
     /// Create a new multi-port data proxy
     pub fn new(
-        token_cache: TokenCache,
         session_manager: SessionManager,
         config: Config,
         k8s_client: K8sClient,
         cache_handle: DefaultEndpointCacheHandle,
-        reservation_router: Option<ReservationRouter>,
     ) -> Self {
         let data_ports = config.get_data_ports();
         let lb_config = config.get_load_balancing();
@@ -80,14 +69,11 @@ impl DataProxy {
 
         Self {
             data_ports,
-            token_cache,
             session_manager,
             config,
             k8s_client,
             default_endpoint_cache: cache_handle.get_cache(),
             load_balancer,
-            reservation_router,
-            pending_reservation_setups: Arc::new(DashMap::new()),
         }
     }
 
@@ -145,28 +131,10 @@ impl DataProxy {
                     let socket_clone = socket.clone();
                     let proxy = self.clone();
 
-                    let is_reservation_setup =
-                        proxy.config.reservation_only && proxy.is_control_packet(&packet_data)?;
-                    if is_reservation_setup {
-                        if proxy.pending_reservation_setups.contains_key(&client_addr) {
-                            warn!(
-                                "Ignoring concurrent reservation setup packet from {}",
-                                client_addr
-                            );
-                            continue;
-                        }
-                        proxy
-                            .pending_reservation_setups
-                            .insert(client_addr, Arc::new(Notify::new()));
-                    }
-
                     tokio::spawn(async move {
                         let result = proxy
                             .handle_udp_packet(socket_clone, client_addr, packet_data, proxy_port)
                             .await;
-                        if is_reservation_setup {
-                            proxy.complete_reservation_setup(&client_addr);
-                        }
                         if let Err(e) = result {
                             error!(
                                 "Error handling UDP packet from {} on port {}: {}",
@@ -218,81 +186,8 @@ impl DataProxy {
         packet_data: Vec<u8>,
         proxy_port: u16,
     ) -> Result<()> {
-        if let Some(token) = self.control_packet_token(&packet_data)? {
-            return self.handle_udp_control_packet(client_addr, token).await;
-        }
-
         self.handle_udp_data_packet(socket, client_addr, packet_data, proxy_port)
             .await
-    }
-
-    fn is_control_packet(&self, packet_data: &[u8]) -> Result<bool> {
-        let magic_bytes = self.config.get_magic_bytes()?;
-        Ok(packet_data.starts_with(&magic_bytes))
-    }
-
-    fn control_packet_token<'a>(&self, packet_data: &'a [u8]) -> Result<Option<&'a str>> {
-        let magic_bytes = self.config.get_magic_bytes()?;
-        if !packet_data.starts_with(&magic_bytes) {
-            return Ok(None);
-        }
-        let token = std::str::from_utf8(&packet_data[magic_bytes.len()..])
-            .context("control packet token must be UTF-8")?;
-        Ok(Some(token))
-    }
-
-    async fn handle_udp_control_packet(&self, client_addr: SocketAddr, token: &str) -> Result<()> {
-        if self.config.reservation_only {
-            let router = self
-                .reservation_router
-                .as_ref()
-                .context("Reservation-controller routing is not configured")?;
-            tokio::time::timeout(
-                RESERVATION_SETUP_TIMEOUT,
-                router.bind_socket(token, client_addr, &self.config),
-            )
-            .await
-            .context("Reservation gameplay socket setup timed out")??;
-            info!(
-                "Reservation gameplay socket route established for {}",
-                client_addr
-            );
-            return Ok(());
-        }
-
-        let target = self
-            .token_cache
-            .lookup(token)
-            .await
-            .context("invalid or expired control packet token")?;
-        self.session_manager
-            .upsert_multi_port(client_addr, target.cluster_ip, target.port_mappings)
-            .await;
-        info!("Legacy UDP session reset for {}", client_addr);
-        Ok(())
-    }
-
-    fn complete_reservation_setup(&self, client_addr: &SocketAddr) {
-        if let Some((_, notify)) = self.pending_reservation_setups.remove(client_addr) {
-            notify.notify_waiters();
-        }
-    }
-
-    async fn wait_for_reservation_setup(&self, client_addr: &SocketAddr) {
-        loop {
-            let Some(notify) = self
-                .pending_reservation_setups
-                .get(client_addr)
-                .map(|entry| entry.clone())
-            else {
-                return;
-            };
-            let notified = notify.notified();
-            if !self.pending_reservation_setups.contains_key(client_addr) {
-                return;
-            }
-            notified.await;
-        }
     }
 
     /// Handle a TCP connection
@@ -308,9 +203,6 @@ impl DataProxy {
         let session = self.session_manager.get_by_addr(&client_addr);
 
         if session.is_none() {
-            if self.config.reservation_only {
-                anyhow::bail!("controller allocation required before TCP data");
-            }
             // No session - establish default route
             self.establish_default_session(client_addr, proxy_port, Protocol::Tcp)
                 .await?;
@@ -362,20 +254,13 @@ impl DataProxy {
         packet_data: Vec<u8>,
         proxy_port: u16,
     ) -> Result<()> {
-        if self.config.reservation_only {
-            self.wait_for_reservation_setup(&client_addr).await;
-        }
-
-        // Exact reservation routes take precedence over legacy IP routes.
+        // TCP queries establish the route before gameplay begins.
         if self.session_manager.get_by_addr(&client_addr).is_some() {
             // Session exists - get or create dedicated socket and forward packet
             self.proxy_packet_bidirectional(socket, client_addr, packet_data, proxy_port)
                 .await?;
             self.session_manager.touch_by_addr(&client_addr);
         } else {
-            if self.config.reservation_only {
-                anyhow::bail!("controller allocation required before UDP data");
-            }
             // No session exists - establish default route for this client
             self.handle_first_packet(socket, client_addr, packet_data, proxy_port)
                 .await?;
@@ -726,44 +611,102 @@ impl Clone for DataProxy {
     fn clone(&self) -> Self {
         Self {
             data_ports: self.data_ports.clone(),
-            token_cache: self.token_cache.clone(),
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
             k8s_client: self.k8s_client.clone(),
             default_endpoint_cache: self.default_endpoint_cache.clone(),
             load_balancer: self.load_balancer.clone(),
-            reservation_router: self.reservation_router.clone(),
-            pending_reservation_setups: self.pending_reservation_setups.clone(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_magic_bytes_detection() {
-        let magic_bytes = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x52, 0x45, 0x53, 0x45, 0x54];
-        let mut packet = magic_bytes.clone();
-        packet.extend_from_slice(b"test-token-123");
+    use super::*;
+    use crate::query_server::QueryServer;
+    use http_body_util::Full;
+    use hyper::{Response, body::Bytes, server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        assert!(packet.starts_with(&magic_bytes));
+    #[tokio::test]
+    async fn tcp_label_query_then_unmodified_udp_reaches_selected_pod() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let backend = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let backend_port = backend.local_addr().unwrap().port();
+            let gameplay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let data_addr = gameplay.local_addr().unwrap();
+            let api = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api_addr = api.local_addr().unwrap();
+            let pod_list = serde_json::json!({
+                "apiVersion":"v1", "kind":"PodList", "metadata":{},
+                "items":[{
+                    "apiVersion":"v1", "kind":"Pod",
+                    "metadata":{"name":"selected-server", "namespace":"games", "uid":"pod-1", "labels":{"map":"tutorial"}},
+                    "spec":{"containers":[{"name":"game", "ports":[{"name":"game", "containerPort":backend_port}]}]},
+                    "status":{"phase":"Running", "podIP":"127.0.0.1", "conditions":[{"type":"Ready", "status":"True"}]}
+                }]
+            }).to_string();
+            let api_task = tokio::spawn(async move {
+                let (stream, _) = api.accept().await.unwrap();
+                http1::Builder::new().serve_connection(TokioIo::new(stream), service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                    assert_eq!(request.uri().path(), "/api/v1/namespaces/games/pods");
+                    assert!(request.uri().query().unwrap().contains("labelSelector=map%3Dtutorial"));
+                    let body = pod_list.clone();
+                    async move { Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(body)))) }
+                })).await.unwrap();
+            });
+            let client = kube::Client::try_from(kube::Config::new(format!("http://{api_addr}").parse().unwrap())).unwrap();
+            let k8s = K8sClient::from_client(client);
+            let config: Config = serde_yaml::from_str(&format!(r#"
+queryPort: 9000
+dataPort: {}
+sessionTimeoutSeconds: 300
+defaultEndpoint:
+  resourceType: pod
+  namespace: games
+resourceQueryMapping:
+  pod:
+    group: ""
+    version: v1
+    resource: pods
+    addressPath: status.podIP
+    portName: game
+"#, data_addr.port())).unwrap();
+            let sessions = SessionManager::new(300);
+            let query = QueryServer::new(9000, k8s.clone(), sessions.clone(), config.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let query_addr = listener.local_addr().unwrap();
+            let query_task = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                query.handle_connection(stream).await.unwrap();
+            });
+            let mut tcp = TcpStream::connect(query_addr).await.unwrap();
+            tcp.write_all(br#"{"type":"query","resourceType":"pod","namespace":"games","labelSelector":{"map":"tutorial"}}"#).await.unwrap();
+            let mut reply = Vec::new();
+            tcp.read_to_end(&mut reply).await.unwrap();
+            let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+            assert_eq!(reply["status"], "ready");
+            assert_eq!(reply["server"], "selected-server");
+            assert_eq!(reply["ports"]["default"], data_addr.port());
+            assert!(reply.get("token").is_none());
+            query_task.await.unwrap();
 
-        let token_bytes = &packet[magic_bytes.len()..];
-        let token = String::from_utf8_lossy(token_bytes);
-        assert_eq!(token, "test-token-123");
-    }
-
-    #[test]
-    fn reservation_setup_packet_matches_control_wire_format() {
-        let magic_bytes = hex::decode("FFFFFFFF5245534554").unwrap();
-        let mut packet = magic_bytes.clone();
-        packet.extend_from_slice(b"controller-reservation-token");
-
-        assert!(packet.starts_with(&magic_bytes));
-        assert_eq!(
-            std::str::from_utf8(&packet[magic_bytes.len()..]).unwrap(),
-            "controller-reservation-token"
-        );
-        assert!(!packet[magic_bytes.len()..].starts_with(b"{"));
+            let proxy = DataProxy::new(sessions.clone(), config, k8s, DefaultEndpointCacheHandle::new());
+            let proxy_task = tokio::spawn(async move { proxy.run_udp_socket(gameplay, data_addr.port()).await.unwrap() });
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let payload = b"\xff\xff\xff\xffRESETordinary-game-bytes";
+            udp.send_to(payload, data_addr).await.unwrap();
+            let mut buffer = [0u8; 128];
+            let (size, upstream) = backend.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(&buffer[..size], payload);
+            backend.send_to(b"server-reply", upstream).await.unwrap();
+            let (size, source) = udp.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(&buffer[..size], b"server-reply");
+            assert_eq!(source, data_addr);
+            proxy_task.abort();
+            api_task.abort();
+            sessions.clear_all().await;
+        }).await.expect("query and UDP forwarding should complete");
     }
 }

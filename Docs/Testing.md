@@ -1,349 +1,79 @@
-[← Back to README](../README.md)
-
 # Testing Guide for UDP Director
 
-This document describes how to test the UDP Director locally and in a Kubernetes environment.
+Verification focuses on TCP query, Kubernetes label matching, and UDP forwarding.
+See [Query API](QueryAPI.md) for the request contract and unresolved integration
+boundaries.
 
-## Unit Tests
-
-Run all unit tests:
-
-```bash
-cargo test
-```
-
-Run tests with output:
+## Local checks
 
 ```bash
-cargo test -- --nocapture
+cargo fmt --all --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
-Run specific test:
+The `tcp_label_query_then_unmodified_udp_reaches_selected_pod` test uses real
+local TCP and UDP sockets with a mocked Kubernetes Pod-list response. It checks
+label selection, the `ready` response, forwarding of unmodified gameplay bytes,
+and the backend reply. It does not prove live Kubernetes deployment or controller
+occupancy behavior.
+
+Character tests cover valid label names, the three character states, requested
+ID filtering, and the 120-second disconnect visibility boundary. Query tests
+cover fragmented character lists larger than one TCP read, incomplete JSON, and
+rejection of removed allocation and session-reset requests.
+
+## Manual query and connection
+
+Use a reachable director and a Ready backend Pod with a real UDP application.
+Configure its named container port and labels in the resource mapping; merely
+declaring a UDP container port does not start a UDP listener.
+
+From the gameplay client's host, query the director:
 
 ```bash
-cargo test test_token_generation_and_lookup
+printf '%s\n' '{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}' | nc <DIRECTOR_IP> 9000
 ```
 
-## Local Development Testing
-
-### Prerequisites
-
-- Kubernetes cluster (kind, minikube, or k3s recommended for local testing)
-- kubectl configured
-- Cilium CNI installed
-
-### Setup Local Cluster with kind
-
-```bash
-# Create a kind cluster
-kind create cluster --name udp-director-test
-
-# Install Cilium
-cilium install
-
-# Verify Cilium is running
-cilium status
-```
-
-### Deploy Test Resources
-
-Create a test namespace and mock game server:
-
-```yaml
-# test-resources.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: game-servers
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: test-gameserver-1
-  namespace: game-servers
-  labels:
-    agones.dev/gameserver: test-gameserver-1
-    game.example.com/map: de_dust2
-spec:
-  containers:
-  - name: game
-    image: nginx:alpine
-    ports:
-    - containerPort: 7777
-      protocol: UDP
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: test-gameserver-1
-  namespace: game-servers
-  labels:
-    agones.dev/gameserver: test-gameserver-1
-spec:
-  selector:
-    agones.dev/gameserver: test-gameserver-1
-  ports:
-  - name: default
-    port: 7777
-    protocol: UDP
-```
-
-Apply:
-
-```bash
-kubectl apply -f test-resources.yaml
-```
-
-### Deploy UDP Director
-
-```bash
-# Build and load image into kind
-docker build -t udp-director:latest .
-kind load docker-image udp-director:latest --name udp-director-test
-
-# Deploy
-kubectl apply -f k8s/rbac.yaml
-# Use the games configmap for testing with Agones
-kubectl apply -f k8s/configmap-games.yaml
-kubectl apply -f k8s/deployment.yaml
-
-# Wait for pod to be ready
-kubectl wait --for=condition=ready pod -l app=udp-director -n udp-director --timeout=60s
-```
-
-### Test Query Server
-
-Port-forward the query server:
-
-```bash
-kubectl port-forward -n udp-director svc/udp-director 9000:9000
-```
-
-In another terminal, test the query:
-
-```bash
-# Using curl with JSON
-echo '{
-  "resourceType": "gameserver",
-  "namespace": "game-servers",
-  "labelSelector": {
-    "game.example.com/map": "de_dust2"
-  }
-}' | nc localhost 9000
-```
-
-Expected response:
+Expect a response such as:
 
 ```json
-{"token":"550e8400-e29b-41d4-a716-446655440000"}
+{"status":"ready","server":"tutorial-0","ports":{"default":7777}}
 ```
 
-### Test Data Proxy
+Send normal application datagrams to that same director's returned UDP port and
+verify the application reply. Do not send a token or reset packet first. Use an
+actual UDP network path; TCP query port forwarding alone does not provide it.
+The current IP-keyed route requires the query and gameplay to arrive from the
+same source IP. See the API document's shared-NAT limitation.
 
-Port-forward the data port:
-
-```bash
-kubectl port-forward -n udp-director svc/udp-director 7777:7777
-```
-
-Test with netcat:
-
-```bash
-# Send token (replace with actual token from query)
-echo "550e8400-e29b-41d4-a716-446655440000" | nc -u localhost 7777
-
-# Send game data
-echo "PLAYER_MOVE x:100 y:200" | nc -u localhost 7777
-```
-
-### Test Session Reset
-
-```bash
-# Get a new token
-TOKEN_B=$(echo '{"resourceType":"gameserver","namespace":"game-servers"}' | nc localhost 9000 | jq -r '.token')
-
-# Create control packet (magic bytes + token)
-# Magic bytes: FFFFFFFF5245534554
-echo -n -e "\xFF\xFF\xFF\xFF\x52\x45\x53\x45\x54${TOKEN_B}" | nc -u localhost 7777
-```
-
-## Integration Tests
-
-### Using the Example Client
-
-Run the example client (requires UDP Director running):
+The repository's example client demonstrates this sequence:
 
 ```bash
 cargo run --example client_example
 ```
 
-This will:
-1. Query for a game server
-2. Establish a UDP session
-3. Send game data
-4. Reset to a new server
-5. Continue sending data
+## Character lookup
 
-## Load Testing
+Apply the metadata representation documented in [Query API](QueryAPI.md) to a
+Ready Pod, then send:
 
-### Using vegeta for Query Server
-
-```bash
-# Install vegeta
-go install github.com/tsenart/vegeta@latest
-
-# Create target file
-cat > targets.txt << EOF
-POST http://localhost:9000
-Content-Type: application/json
-@query.json
-EOF
-
-# Create query file
-cat > query.json << EOF
-{
-  "resourceType": "gameserver",
-  "namespace": "game-servers"
-}
-EOF
-
-# Run load test
-echo "POST http://localhost:9000" | vegeta attack -rate=100 -duration=10s -body=query.json | vegeta report
+```json
+{"type":"characterList","namespace":"game-servers","characterIds":["friend-1"]}
 ```
 
-### UDP Load Testing
+Verify that only matching visible characters are returned. A disconnected
+character is visible before 120 seconds and excluded at 120 seconds. This lookup
+does not remove Pod labels or change occupancy; the owning controller handles
+those mutations from actual game-server events.
 
-Use `iperf3` for UDP throughput testing:
+## Troubleshooting
 
-```bash
-# Server side (in a test pod)
-kubectl run iperf-server --image=networkstatic/iperf3 -- -s -p 7777
+- No matching resource: check namespace, configured resource type, selectors,
+  Pod readiness, Pod IP, and the named container port.
+- No gameplay reply: check the `ready` response, director UDP exposure, backend
+  listener, source IP, and forwarding logs.
+- Missing character: check the label prefix, exact status spelling, requested ID,
+  and valid disconnect timestamp within the reconnect window.
 
-# Client side
-iperf3 -c <udp-director-ip> -u -p 7777 -b 10M -t 30
-```
-
-## Debugging
-
-### View Logs
-
-```bash
-# Follow logs
-kubectl logs -n udp-director -l app=udp-director -f
-
-# View logs with debug level
-kubectl set env deployment/udp-director -n udp-director RUST_LOG=udp_director=debug
-```
-
-Enable verbose logging:
-```bash
-RUST_LOG=udp_director=debug cargo run
-```
-
-[← Back to README](../README.md)
-
-### Check Session State
-
-Add debug endpoints (future enhancement) or inspect logs for session information.
-
-### Network Debugging
-
-```bash
-# Check connectivity to query port
-nc -zv <udp-director-ip> 9000
-
-# Check UDP port
-nc -zuv <udp-director-ip> 7777
-
-# Capture packets
-kubectl exec -n udp-director <pod-name> -- tcpdump -i any -n port 7777
-```
-
-## Performance Benchmarks
-
-### Expected Performance
-
-- **Query Latency**: < 10ms (depends on K8s API latency)
-- **Proxy Latency**: < 1ms added latency
-- **Throughput**: > 10,000 packets/second per instance
-- **Concurrent Sessions**: > 1,000 sessions per instance
-
-### Measuring Performance
-
-```bash
-# Query server response time
-time echo '{"resourceType":"gameserver","namespace":"game-servers"}' | nc localhost 9000
-
-# Packet round-trip time (requires echo server)
-ping -c 100 <target-server-via-proxy>
-```
-
-## Troubleshooting Tests
-
-### Query Returns "No matching resources found"
-
-- Verify test resources are deployed: `kubectl get pods -n game-servers`
-- Check labels match: `kubectl get pods -n game-servers --show-labels`
-- Verify Services exist: `kubectl get svc -n game-servers`
-
-### Token Validation Fails
-
-- Check token TTL hasn't expired (default: 30 seconds)
-- Verify token is sent as raw bytes, not JSON
-- Check logs for token validation errors
-
-### Session Not Established
-
-- Verify UDP port is accessible
-- Check firewall rules
-- Ensure LoadBalancer has external IP assigned
-- Review logs for connection errors
-
-### Control Packet Not Working
-
-- Verify magic bytes are correct: `FFFFFFFF5245534554`
-- Ensure packet format is: `[magic_bytes][token]`
-- Check token is valid and not expired
-- Review logs for control packet detection
-
-## Continuous Integration
-
-The project includes GitHub Actions workflows that run:
-
-- `cargo fmt --check`
-- `cargo clippy -- -D warnings`
-- `cargo test`
-- `cargo build --release`
-- Docker image build
-
-See `.github/workflows/ci.yml` for details.
-
-## Test Coverage
-
-Generate test coverage report (requires `cargo-tarpaulin`):
-
-```bash
-# Install tarpaulin
-cargo install cargo-tarpaulin
-
-# Generate coverage
-cargo tarpaulin --out Html --output-dir coverage
-
-# View report
-open coverage/index.html
-```
-
-## Cleanup
-
-```bash
-# Delete test resources
-kubectl delete -f test-resources.yaml
-
-# Delete UDP Director
-kubectl delete -f k8s/deployment.yaml
-kubectl delete -f k8s/configmap-games.yaml
-kubectl delete -f k8s/rbac.yaml
-
-# Delete kind cluster
-kind delete cluster --name udp-director-test
-```
+[Back to README](../README.md)

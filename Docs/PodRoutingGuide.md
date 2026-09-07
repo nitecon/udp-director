@@ -40,7 +40,6 @@ data:
   config.yaml: |
     queryPort: 9000
     dataPort: 7777
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
     controlPacketMagicBytes: "FFFFFFFF5245534554"
 
@@ -160,7 +159,6 @@ data:
   config.yaml: |
     queryPort: 9000
     dataPort: 7777
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
     controlPacketMagicBytes: "FFFFFFFF5245534554"
 
@@ -266,30 +264,21 @@ statusQuery:
 
 ## Client Usage
 
-### Query for Available Pods
+Query the regional director over TCP:
 
 ```bash
-# TCP query to port 9000
-echo '{"resourceType":"game-pod","namespace":"game-servers","labelSelector":{"app":"game-server"}}' | nc <UDP-DIRECTOR-IP> 9000
+printf '%s\n' '{"type":"query","resourceType":"game-pod","namespace":"game-servers","labelSelector":{"app":"game-server"}}' | nc <UDP-DIRECTOR-IP> 9000
 ```
 
-**Response:**
+A successful response identifies the server and public director port:
+
 ```json
-{
-  "token": "550e8400-e29b-41d4-a716-446655440000",
-  "address": "10.244.1.44:7777",
-  "ttl": 30
-}
+{"status":"ready","server":"game-server-0","ports":{"default":7777}}
 ```
 
-### Connect to Pod
-
-```bash
-# Send token as first UDP packet to port 7777
-echo "550e8400-e29b-41d4-a716-446655440000" | nc -u <UDP-DIRECTOR-IP> 7777
-
-# All subsequent UDP packets are proxied to the pod
-```
+Send application datagrams directly to that director's UDP port. See
+[Query API](QueryAPI.md) for character lookup, framing, and the current
+connection identity limitation. No routing token or setup packet is required.
 
 ## Troubleshooting
 
@@ -350,7 +339,7 @@ kubectl exec -n game-servers <UDP-DIRECTOR-POD> -- ping <POD-IP>
 ### Pod IP Stability
 
 Pod IPs change when pods are recreated. UDP Director handles this by:
-- Querying fresh pod IPs for each token request
+- Querying fresh pod IPs for each server query
 - Maintaining session state even if pod IP changes mid-session
 - Using control packets to migrate sessions to new pods
 
@@ -362,10 +351,9 @@ Pod IPs change when pods are recreated. UDP Director handles this by:
 
 ### Caching
 
-UDP Director caches resource queries for performance:
-- Token cache TTL: 30 seconds (configurable)
-- Session cache: Active until timeout
-- Resource monitor: Periodic refresh
+The director retains forwarding sessions until their configured timeout and
+monitors backend resources. A proxy timeout does not report a player disconnect
+or remove the controller-owned character label.
 
 ## Security Considerations
 

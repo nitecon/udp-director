@@ -1,11 +1,7 @@
 # UDP Director Multi-Port Configuration Example
-# This configuration demonstrates Approach 2: Port Mapping in Token
-# A single token supports multiple ports with intelligent routing
 
 queryPort: 9000
-tokenTtlSeconds: 30
 sessionTimeoutSeconds: 300
-controlPacketMagicBytes: "FFFFFFFF5245534554"
 
 # Multi-port configuration - define all ports the proxy should listen on
 # NOTE: TCP support is not yet implemented - use UDP only

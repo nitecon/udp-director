@@ -7,11 +7,16 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-09-07
 
 Internal and product-specific dependencies are being removed from this public
-open-source project. Integrations use a generic, configurable reservation-controller
-interface; product-specific allocation policy and services belong in their own projects.
+open-source project. The routing ticket cache, reservation-controller interface,
+and UDP token/reset exchange are removed in favor of TCP query followed by UDP
+forwarding. Character-list lookup reads native Pod labels and disconnect
+metadata. See [Query API](QueryAPI.md) for the current recovery contract and its
+remaining integration decisions.
+
+Older release entries below describe historical behavior, not the current API.
 
 ## [0.2.1] - 2025-11-03
 

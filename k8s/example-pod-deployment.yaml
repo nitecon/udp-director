@@ -122,9 +122,7 @@ data:
   config.yaml: |
     queryPort: 9000
     dataPort: 7777
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
-    controlPacketMagicBytes: "FFFFFFFF5245534554"
 
     # Default endpoint targets pods with specific labels
     defaultEndpoint:
@@ -226,9 +224,7 @@ spec:
 #    # Connect to the query port (9000) and send a JSON query:
 #    echo '{"resourceType":"game-server-pod","namespace":"game-servers","labelSelector":{"app":"demo-game-server"}}' | nc <EXTERNAL-IP> 9000
 #
-# 4. The response will include a token and the pod's IP:port
 #
-# 5. Use the token to connect to the data port (7777) and start sending UDP traffic
 #
 # Advanced Queries:
 #

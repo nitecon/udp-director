@@ -56,7 +56,7 @@ ports:
 **Use for**: Direct pod routing with multiple ports (UDP/TCP)
 
 **Features**:
-- **Single token for all ports**
+- **One TCP query installs mappings for all configured ports**
 - Supports both UDP and TCP protocols
 - Intelligent port-based routing
 - Perfect for game servers with multiple ports
@@ -78,8 +78,8 @@ ports:
 **Example Query Response**:
 ```json
 {
-  "token": "550e8400-...",
-  "address": "10.244.1.44",
+  "status": "ready",
+  "server": "game-server-0",
   "ports": {
     "game-udp": 7777,
     "game-tcp": 7777,

@@ -5,16 +5,25 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
 
+use crate::characters::{CharacterServer, characters_on_pod, valid_character_id};
 use crate::config::Config;
 use crate::k8s_client::{K8sClient, StatusQuery};
-use crate::reservation_controller::ReservationRouter;
 use crate::session::SessionManager;
-use crate::token_cache::{TokenCache, TokenTarget};
 
 /// Query request from client
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum QueryRequest {
+    /// Read-only search for Pods containing any requested character.
+    CharacterList {
+        namespace: String,
+        character_ids: Vec<String>,
+        label_selector: Option<HashMap<String, String>>,
+    },
     /// Query for a resource and establish a session
     Query {
         resource_type: String,
@@ -23,10 +32,6 @@ pub enum QueryRequest {
         label_selector: Option<HashMap<String, String>>,
         annotation_selector: Option<HashMap<String, String>>,
     },
-    /// Reset an existing session with a new token
-    SessionReset { token: String },
-    /// Consume a trusted reservation-controller token.
-    Allocation { token: String },
 }
 
 /// Status query DTO
@@ -41,12 +46,12 @@ pub struct StatusQueryDto {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum QueryResponse {
-    Success {
-        token: String,
+    CharacterList {
+        servers: Vec<CharacterServer>,
     },
-    SuccessMultiPort {
-        token: String,
-        address: String,
+    Success {
+        status: String,
+        server: String,
         ports: HashMap<String, u16>,
     },
     Error {
@@ -55,14 +60,12 @@ pub enum QueryResponse {
 }
 
 /// TCP Query Server (Phase 1)
-/// Now establishes sessions immediately when returning tokens
+/// Establishes the route during the TCP query, before gameplay begins
 pub struct QueryServer {
     port: u16,
     k8s_client: K8sClient,
-    token_cache: TokenCache,
     session_manager: SessionManager,
     config: Config,
-    reservation_router: Option<ReservationRouter>,
 }
 
 impl QueryServer {
@@ -70,18 +73,14 @@ impl QueryServer {
     pub fn new(
         port: u16,
         k8s_client: K8sClient,
-        token_cache: TokenCache,
         session_manager: SessionManager,
         config: Config,
-        reservation_router: Option<ReservationRouter>,
     ) -> Self {
         Self {
             port,
             k8s_client,
-            token_cache,
             session_manager,
             config,
-            reservation_router,
         }
     }
 
@@ -112,30 +111,18 @@ impl QueryServer {
     }
 
     /// Handle a single query connection
-    async fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
+    pub(crate) async fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
         // Get client address for session establishment
         let client_addr = stream.peer_addr()?;
 
-        // Read the JSON payload
-        let mut buffer = vec![0u8; 4096];
-        let n = stream
-            .read(&mut buffer)
-            .await
-            .context("Failed to read from stream")?;
-
-        if n == 0 {
-            return Ok(());
-        }
-
-        let request_data = &buffer[..n];
-        let request: QueryRequest = match serde_json::from_slice(request_data) {
-            Ok(req) => req,
-            Err(e) => {
+        let request = match read_request(&mut stream).await {
+            Ok(Some(request)) => request,
+            Ok(None) => return Ok(()),
+            Err(error) => {
                 let response = QueryResponse::Error {
-                    error: format!("Invalid JSON: {}", e),
+                    error: error.to_string(),
                 };
-                let response_json = serde_json::to_string(&response)?;
-                stream.write_all(response_json.as_bytes()).await?;
+                stream.write_all(&serde_json::to_vec(&response)?).await?;
                 return Ok(());
             }
         };
@@ -160,6 +147,46 @@ impl QueryServer {
         client_addr: std::net::SocketAddr,
     ) -> QueryResponse {
         match request {
+            QueryRequest::CharacterList {
+                namespace,
+                character_ids,
+                label_selector,
+            } => {
+                if character_ids.iter().any(|id| !valid_character_id(id)) {
+                    return QueryResponse::Error {
+                        error: "Invalid character ID for a Kubernetes label".into(),
+                    };
+                }
+                let pods = match self
+                    .k8s_client
+                    .list_pods(&namespace, label_selector.as_ref())
+                    .await
+                {
+                    Ok(pods) => pods,
+                    Err(error) => {
+                        return QueryResponse::Error {
+                            error: error.to_string(),
+                        };
+                    }
+                };
+                let now = time::OffsetDateTime::now_utc();
+                let mut servers: Vec<_> = pods
+                    .into_iter()
+                    .filter_map(|pod| {
+                        let characters = characters_on_pod(&pod, &self.config, &character_ids, now);
+                        if characters.is_empty() {
+                            return None;
+                        }
+                        Some(CharacterServer {
+                            namespace: namespace.clone(),
+                            name: pod.metadata.name.unwrap_or_default(),
+                            characters,
+                        })
+                    })
+                    .collect();
+                servers.sort_by(|a, b| a.name.cmp(&b.name));
+                QueryResponse::CharacterList { servers }
+            }
             QueryRequest::Query {
                 resource_type,
                 namespace,
@@ -167,11 +194,6 @@ impl QueryServer {
                 label_selector,
                 annotation_selector,
             } => {
-                if self.config.reservation_only {
-                    return QueryResponse::Error {
-                        error: "controller allocation required".to_string(),
-                    };
-                }
                 self.process_resource_query(
                     resource_type,
                     namespace,
@@ -182,56 +204,6 @@ impl QueryServer {
                 )
                 .await
             }
-            QueryRequest::SessionReset { token } => {
-                if self.config.reservation_only {
-                    return QueryResponse::Error {
-                        error: "controller allocation required".to_string(),
-                    };
-                }
-                self.process_session_reset(token, client_addr).await
-            }
-            QueryRequest::Allocation { token } => match &self.reservation_router {
-                Some(router) => match router.bind(&token, client_addr, &self.config).await {
-                    Ok(()) => QueryResponse::Success { token },
-                    Err(error) => QueryResponse::Error {
-                        error: error.to_string(),
-                    },
-                },
-                None => QueryResponse::Error {
-                    error: "Reservation-controller routing is not configured".to_string(),
-                },
-            },
-        }
-    }
-
-    /// Process a session reset request
-    async fn process_session_reset(
-        &self,
-        token: String,
-        client_addr: std::net::SocketAddr,
-    ) -> QueryResponse {
-        // Look up the token
-        match self.token_cache.lookup(&token).await {
-            Some(target) => {
-                // Valid token - update session
-                self.session_manager
-                    .upsert_multi_port(
-                        client_addr,
-                        target.cluster_ip.clone(),
-                        target.port_mappings.clone(),
-                    )
-                    .await;
-                info!(
-                    "Session reset via query port: {} -> {} ({} ports)",
-                    client_addr,
-                    target.cluster_ip,
-                    target.port_mappings.len()
-                );
-                QueryResponse::Success { token }
-            }
-            None => QueryResponse::Error {
-                error: "Invalid or expired token".to_string(),
-            },
         }
     }
 
@@ -299,38 +271,40 @@ impl QueryServer {
                 Err(e) => return e,
             };
 
-            // Build port mappings for TokenTarget
+            // Build port mappings for the selected target
             let data_ports = self.config.get_data_ports();
-            let mut token_port_mappings = HashMap::new();
+            let mut port_mappings = HashMap::new();
 
             for data_port_config in &data_ports {
                 if let Some(target_port) = ports_map.get(&data_port_config.name) {
-                    token_port_mappings.insert(
+                    port_mappings.insert(
                         (data_port_config.port, data_port_config.protocol),
                         *target_port,
                     );
                 }
             }
 
-            let target = TokenTarget::multi_port(cluster_ip.clone(), token_port_mappings.clone());
-            let token = self.token_cache.generate_token(target).await;
-
             // Establish session immediately for this client
             self.session_manager
-                .upsert_multi_port(client_addr, cluster_ip.clone(), token_port_mappings)
+                .upsert_multi_port(client_addr, cluster_ip.clone(), port_mappings)
                 .await;
 
             info!(
-                "Generated multi-port token and established session for {} -> {} ({} ports)",
+                "Established multi-port route for {} -> {} ({} ports)",
                 client_addr,
                 resource_name,
                 ports_map.len()
             );
 
-            QueryResponse::SuccessMultiPort {
-                token,
-                address: cluster_ip,
-                ports: ports_map,
+            QueryResponse::Success {
+                status: "ready".to_string(),
+                server: resource_name,
+                ports: self
+                    .config
+                    .get_data_ports()
+                    .into_iter()
+                    .map(|p| (p.name, p.port))
+                    .collect(),
             }
         } else {
             // Single port approach (backwards compatibility)
@@ -342,26 +316,26 @@ impl QueryServer {
                 Err(e) => return e,
             };
 
-            let target = TokenTarget::single_port(cluster_ip.clone(), port);
-            let token = self.token_cache.generate_token(target).await;
+            let port_mappings = self
+                .config
+                .get_data_ports()
+                .into_iter()
+                .map(|p| ((p.port, p.protocol), port))
+                .collect();
+            self.session_manager
+                .upsert_multi_port(client_addr, cluster_ip, port_mappings)
+                .await;
 
-            // Establish session immediately for this client
-            let target_addr =
-                format!("{}:{}", cluster_ip, port)
-                    .parse()
-                    .map_err(|e| QueryResponse::Error {
-                        error: format!("Invalid target address: {}", e),
-                    });
-
-            if let Ok(addr) = target_addr {
-                self.session_manager.upsert(client_addr, addr).await;
-                info!(
-                    "Generated token and established session for {} -> {}",
-                    client_addr, resource_name
-                );
+            QueryResponse::Success {
+                status: "ready".to_string(),
+                server: resource_name,
+                ports: self
+                    .config
+                    .get_data_ports()
+                    .into_iter()
+                    .map(|p| (p.name, p.port))
+                    .collect(),
             }
-
-            QueryResponse::Success { token }
         }
     }
 
@@ -375,7 +349,7 @@ impl QueryServer {
         mapping: &crate::config::ResourceMapping,
         status_query: Option<&StatusQuery>,
     ) -> Result<Vec<kube::api::DynamicObject>, QueryResponse> {
-        let resources = self
+        let mut resources = self
             .k8s_client
             .query_resources(
                 namespace,
@@ -388,6 +362,15 @@ impl QueryServer {
             .map_err(|e| QueryResponse::Error {
                 error: format!("Failed to query resources: {}", e),
             })?;
+
+        if mapping.group.is_empty() && mapping.resource == "pods" {
+            resources.retain(|resource| {
+                serde_json::to_value(resource)
+                    .ok()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .is_some_and(|pod| K8sClient::pod_ready(&pod))
+            });
+        }
 
         if resources.is_empty() {
             return Err(QueryResponse::Error {
@@ -526,16 +509,40 @@ impl QueryServer {
     }
 }
 
+/// One JSON document per TCP connection. TCP reads are not message boundaries.
+async fn read_request<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+) -> Result<Option<QueryRequest>> {
+    let mut payload = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            if payload.is_empty() {
+                return Ok(None);
+            }
+            anyhow::bail!("Incomplete JSON request");
+        }
+        payload.extend_from_slice(&chunk[..n]);
+        if payload.len() > 65536 {
+            anyhow::bail!("Query exceeds 65536 bytes");
+        }
+        match serde_json::from_slice(&payload) {
+            Ok(request) => return Ok(Some(request)),
+            Err(error) if error.is_eof() => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 // Manual Clone implementation since TcpListener is not Clone
 impl Clone for QueryServer {
     fn clone(&self) -> Self {
         Self {
             port: self.port,
             k8s_client: self.k8s_client.clone(),
-            token_cache: self.token_cache.clone(),
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
-            reservation_router: self.reservation_router.clone(),
         }
     }
 }
@@ -589,33 +596,40 @@ mod tests {
     }
 
     #[test]
-    fn test_session_reset_request_deserialization() {
-        let json = r#"{
-            "type": "sessionReset",
-            "token": "test-token-123"
-        }"#;
-
-        let request: QueryRequest = serde_json::from_str(json).unwrap();
-        match request {
-            QueryRequest::SessionReset { token } => {
-                assert_eq!(token, "test-token-123");
-            }
-            _ => panic!("Expected SessionReset variant"),
+    fn rejects_removed_ticket_requests() {
+        for kind in ["allocation", "sessionReset"] {
+            let value = serde_json::json!({"type": kind, "token": "obsolete"});
+            assert!(serde_json::from_value::<QueryRequest>(value).is_err());
         }
     }
 
-    #[test]
-    fn test_query_response_serialization() {
-        let response = QueryResponse::Success {
-            token: "test-token-123".to_string(),
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("test-token-123"));
+    #[tokio::test]
+    async fn reads_fragmented_character_list_larger_than_one_tcp_read() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        let ids: Vec<_> = (0..128).map(|i| format!("character-{i:050}")).collect();
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "characterList", "namespace": "games", "characterIds": ids
+        }))
+        .unwrap();
+        assert!(payload.len() > 4096);
+        let sending = tokio::spawn(async move {
+            for chunk in payload.chunks(17) {
+                writer.write_all(chunk).await.unwrap();
+            }
+        });
+        let request = read_request(&mut reader).await.unwrap().unwrap();
+        sending.await.unwrap();
+        match request {
+            QueryRequest::CharacterList { character_ids, .. } => {
+                assert_eq!(character_ids.len(), 128)
+            }
+            _ => panic!("expected characterList"),
+        }
+    }
 
-        let response = QueryResponse::Error {
-            error: "Test error".to_string(),
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("Test error"));
+    #[tokio::test]
+    async fn truncated_request_is_not_processed() {
+        let mut reader = &b"{\"type\":\"query\""[..];
+        assert!(read_request(&mut reader).await.is_err());
     }
 }

@@ -10,9 +10,7 @@ data:
     
     queryPort: 9000
     dataPort: 7777
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
-    controlPacketMagicBytes: "FFFFFFFF5245534554"
 
     # Default endpoint - targets pods with specific labels
     defaultEndpoint:

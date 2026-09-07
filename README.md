@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Production%20Ready-green)]()
 
-A Kubernetes-native, high-performance stateful UDP/TCP proxy for dynamic routing with token-based sessions and live migration support. Perfect for game server matchmaking, load balancing, and zero-downtime server switching.
+A Kubernetes-native UDP/TCP proxy. Query a server over TCP using Pod labels, then connect through the same regional director.
 
 ## Quick Links
 
@@ -19,7 +19,7 @@ A Kubernetes-native, high-performance stateful UDP/TCP proxy for dynamic routing
 - **[Testing Guide](Docs/Testing.md)** - Unit, integration, and load testing
 - **[Quick Reference](Docs/QuickReference.md)** - Commands and API reference
 - **[Project Summary](Docs/ProjectSummary.md)** - Implementation status
-- **[Reservation controller routing](Docs/ReservationController.md)** - Exact-Pod allocation and drain contract
+- **[Query and Connection API](Docs/QueryAPI.md)** - TCP queries, character lookup, and UDP routing
 - **[Changelog](Docs/Changelog.md)** - Version history
 
 ## What Problem Does This Solve?
@@ -39,34 +39,13 @@ Traditional UDP load balancers are stateless and can't intelligently route clien
 
 ## How It Works
 
-UDP Director uses a query-based session establishment flow:
+1. Send a TCP query to the regional director on port 9000 with Kubernetes label selectors.
+2. The director selects a matching Ready Pod and establishes the forwarding route.
+3. Wait for the query response, then send gameplay directly over UDP through the same director.
+4. Use TCP character-list queries to find Pods containing friends. Character status lives on Pod labels; actual server connection events drive occupancy.
 
-```
-1. QUERY (TCP :9000)
-   Client → Director: "Find me a game server with map=de_dust2"
-   Director → K8s API: Query resources, find matching service
-   Director → Client: Return token + establish session immediately
-   Route: Client IP → Target mapping created
-
-2. CONNECT (TCP/UDP :7777+)
-   Client → Director: Connect and send data (no token needed)
-   Director: Route based on existing session
-   Director: Isolate each client UDP source port in its own upstream flow
-   Client ↔ Target: All traffic proxied (TCP or UDP)
-
-3. RESET (UDP :7777) - Optional
-   Client → Director: Send control packet with new token
-   Director: Update session to point to new target
-   Client ↔ New Target: Traffic seamlessly redirected
-```
-
-**Key Features:**
-- **True Layer 3 Load Balancing**: Sessions established via query port, not first packet inspection
-- **Intelligent Load Balancing**: Least sessions or label-based arithmetic strategies
-- **TCP & UDP Support**: Full support for both protocols on data ports
-- **No Packet Loss**: All data packets forwarded immediately
-- **Multi-Port Sessions**: Single query establishes access to all configured ports
-- **Capacity-Aware Routing**: Prevent overloading backends with label-based load balancing
+No routing ticket, token redemption, or UDP setup exchange is required.
+See [Query and Connection API](Docs/QueryAPI.md) for the wire format and routing constraints.
 
 ## Quick Start
 
@@ -126,70 +105,29 @@ kubectl set image deployment/udp-director \
 ### Client Integration Example
 
 ```bash
-# Phase 1: Query for backend (session established automatically)
-echo '{"resourceType":"gameserver","namespace":"game-servers","labelSelector":{"agones.dev/fleet":"tutorial"},"statusQuery":{"jsonPath":"status.state","expectedValue":"Ready"}}' | nc <LoadBalancer-IP> 9000
-# Response: {"token":"550e8400-...","address":"10.244.1.44","ports":{"game-udp":7777,"game-tcp":7777}}
-# Session is now established for your client IP:Port
+printf '%s\n' '{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}' | nc <regional-director> 9000
+# {"status":"ready","server":"tutorial-0","ports":{"default":7777}}
 
-# Phase 2: Connect and send data immediately (no token needed)
-# UDP example
-echo "GAME_DATA_PACKET" | nc -u <LoadBalancer-IP> 7777
-
-# TCP example
-nc <LoadBalancer-IP> 7777
-# Start sending data immediately
-
-# Phase 3: Reset to new server (optional)
-# Send control packet: [MagicBytes][NewToken]
-echo -n -e "\xFF\xFF\xFF\xFF\x52\x45\x53\x45\x54${NEW_TOKEN}" | nc -u <LoadBalancer-IP> 7777
+# After the query succeeds, send gameplay using the same director endpoint.
+printf 'gameplay' | nc -u <regional-director> 7777
 ```
 
-**Note**: Session is established when you query, not when you send the first packet. This means:
-- No need to send token as first packet
-- All data packets are forwarded immediately
-- Works with standard TCP/UDP clients
-
-See [Technical Reference](Docs/TechnicalReference.md) and [Testing Guide](Docs/Testing.md) for complete examples.
+See [Query and Connection API](Docs/QueryAPI.md) and the [Rust client example](examples/client_example.rs).
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes Cluster                        │
-│                                                               │
-│  ┌────────────────────────────────────────────────────┐     │
-│  │              UDP Director Pod                       │     │
-│  │                                                      │     │
-│  │  ┌─────────────┐         ┌──────────────────┐     │     │
-│  │  │Query Server │         │   Data Proxy     │     │     │
-│  │  │  (TCP:9000) │         │   (UDP:7777)     │     │     │
-│  │  └──────┬──────┘         └────────┬─────────┘     │     │
-│  │         │                          │                │     │
-│  │  ┌──────▼────────┐      ┌─────────▼─────────┐     │     │
-│  │  │ Token Cache   │◄─────┤ Session Manager   │     │     │
-│  │  │  (TTL: 30s)   │      │ (Timeout: 300s)   │     │     │
-│  │  └───────────────┘      └───────────────────┘     │     │
-│  │         │                                           │     │
-│  │  ┌──────▼─────────────────────────────────┐       │     │
-│  │  │    Kubernetes API Client                │       │     │
-│  │  └─────────────────────────────────────────┘       │     │
-│  └────────────────────────────────────────────────────┘     │
-│                                                               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
-│  │GameSvr 1 │  │GameSvr 2 │  │GameSvr N │                  │
-│  └──────────┘  └──────────┘  └──────────┘                  │
-└─────────────────────────────────────────────────────────────┘
-         ▲
-         │ UDP/TCP Traffic
-         │
-   External Client
+```text
+Client -- TCP query --> Director -- label selection --> Kubernetes Pods
+Client <-- route ready -- Director
+Client <====== UDP through Director ======> Selected Pod
+Server -- actual connect/disconnect --> Capacity controller -- Pod character labels
 ```
 
 ## Configuration
 
 Choose the appropriate ConfigMap for your use case:
 
-- **`k8s/configmap-pods-multiport.yaml`** - Multi-port pod routing (recommended) - Single token for multiple ports
+- **`k8s/configmap-pods-multiport.yaml`** - Multi-port pod routing (recommended) - One query for multiple ports
 - **`k8s/configmap-pods.yaml`** - Single-port pod routing - For standard Kubernetes pods
 - **`k8s/configmap-agones-gameserver.yaml`** - For Agones GameServers (direct resource inspection)
 - **`k8s/configmap-agones-service.yaml`** - For Agones GameServers (service-based routing, legacy)
@@ -201,9 +139,7 @@ dataPorts:                         # Multiple data ports (multi-port config)
   - port: 7777
     protocol: "udp"
     name: "game-udp"
-tokenTTLSeconds: 30                # Token validity
 sessionTimeoutSeconds: 300         # Session timeout
-controlPacketMagicBytes: "FFFFFFFF5245534554"  # Control packet ID
 
 # Load balancing (optional)
 loadBalancing:

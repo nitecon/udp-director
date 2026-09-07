@@ -1,42 +1,9 @@
-[← Back to README](../README.md)
-
 # Multi-Port Support
 
-UDP Director supports routing to multiple ports using a single token. This is essential for game servers that expose multiple ports for different purposes (e.g., game traffic, RCON, query, voice chat).
-
-## Overview
-
-**Single Token, Multiple Ports** - One token provides access to all configured ports on your game server.
-
-### Benefits
-
-- ✅ **Simplified Client Experience** - Get one token, connect to any port
-- ✅ **Efficient Resource Usage** - Single proxy instance handles all ports
-- ✅ **Protocol Flexibility** - Supports both UDP and TCP
-- ✅ **Independent Sessions** - Each port maintains its own session state
-- ✅ **Backwards Compatible** - Single-port configurations still work
-
-## Use Cases
-
-### Game Server with Multiple Ports
-```
-UDP 7777  - Game traffic
-TCP 7777  - RCON (admin console)
-UDP 27015 - Query (server browser)
-UDP 27016 - Voice chat
-```
-
-### Single Token Access
-Clients get one token and can connect to all ports:
-```bash
-# Get token once
-TOKEN=$(query_for_token)
-
-# Use same token for all ports
-connect_game_udp $TOKEN 7777
-connect_rcon_tcp $TOKEN 7777
-connect_query_udp $TOKEN 27015
-```
+One TCP server query installs the selected backend's configured port mappings.
+Clients then send application traffic directly to the regional director's data
+ports. See [Query API](QueryAPI.md) for request and response details and the
+current connection identity limitation.
 
 ## Configuration
 
@@ -44,9 +11,7 @@ connect_query_udp $TOKEN 27015
 
 ```yaml
 queryPort: 9000
-tokenTtlSeconds: 30
 sessionTimeoutSeconds: 300
-controlPacketMagicBytes: "FFFFFFFF5245534554"
 
 # Define multiple data ports that the proxy will listen on
 dataPorts:
@@ -113,59 +78,29 @@ spec:
 
 ## Client Usage
 
-### 1. Query for Token
+Query the director's TCP query port:
 
 ```bash
-# 1. Query for token (returns all port mappings)
-echo '{"resourceType":"game-pod","namespace":"game-servers"}' | nc <IP> 9000
-
-# Response:
-# {
-#   "token": "550e8400-...",
-#   "address": "10.244.1.44",
-#   "ports": {
-#     "game-udp": 7777,
-#     "game-tcp": 7777,
-#     "query": 27015
-#   },
-#   "ttl": 30
-# }
-
-# 2. Connect to each port using the same token
-# Game UDP traffic
-echo "550e8400-..." | nc -u <IP> 7777
-
-# Game TCP traffic
-echo "550e8400-..." | nc <IP> 7777
-
-# Query port
-echo "550e8400-..." | nc -u <IP> 27015
+printf '%s\n' '{"type":"query","resourceType":"game-pod","namespace":"game-servers","labelSelector":{"app":"game-server"}}' | nc <DIRECTOR_IP> 9000
 ```
 
-### 2. Connect to Multiple Ports
+A successful response identifies the selected server and public director ports:
 
-Use the same token for all ports:
-
-```bash
-# Game traffic (UDP)
-echo "$TOKEN" | nc -u <PROXY_IP> 7777
-# Then send game packets...
-
-# RCON (TCP)
-echo "$TOKEN" | nc <PROXY_IP> 7777
-# Then send RCON commands...
-
-# Query (UDP)
-echo "$TOKEN" | nc -u <PROXY_IP> 27015
-# Then send query packets...
+```json
+{"status":"ready","server":"game-server","ports":{"game-udp":7777,"game-tcp":7777,"query":27015}}
 ```
+
+After `ready`, send normal game, RCON, or query protocol traffic to the
+corresponding director port. There is no routing token or setup packet.
+`ready` confirms forwarding setup; actual server connection events determine
+player occupancy.
 
 ## How It Works
 
-1. **Token Generation** - Query server generates a single token containing all port mappings
-2. **Session Establishment** - First packet on each port establishes a session for that port/protocol
-3. **Independent Sessions** - Each port maintains its own session state and timeout
-4. **Intelligent Routing** - Proxy routes packets based on destination port and protocol
+1. The TCP query matches a backend using the configured Kubernetes selectors.
+2. The director installs the backend port mappings for the client's route.
+3. Traffic arriving on each configured data port forwards to its mapped backend
+   port, and replies return to the originating client socket.
 
 ## Backwards Compatibility
 
@@ -188,20 +123,11 @@ See `k8s/configmap-pods-multiport.yaml` for a complete working example.
 
 ## Troubleshooting
 
-### Port Not Found in Token
+### Missing port mapping
 
-**Error:** `No port mapping found for proxy port X`
-
-**Solution:** Ensure the port is configured in both `dataPorts` and `resourceQueryMapping.ports`
-
-### Session Not Established
-
-**Issue:** Packets dropped after sending token
-
-**Check:**
-1. Token is valid (not expired)
-2. Port mapping exists for the destination port
-3. Resource has the required port exposed
+Ensure each named data port has a corresponding resource port mapping and that
+the selected Pod exposes that named container port. Connect to the director's
+returned public port, not directly to the container port.
 
 ### Port Name Mismatch
 

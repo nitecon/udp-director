@@ -42,126 +42,33 @@ make k8s-delete
 
 ---
 
-## 📡 API Reference
+## API and configuration
 
-### Query Server (TCP :9000)
+See [Query API](QueryAPI.md) for TCP request framing, `query`, `characterList`,
+Pod character labels, and the current shared-NAT limitation. Use
+[config.example.yaml](../config.example.yaml) for the minimal Pod configuration.
 
-**Request**:
 ```json
-{
-  "type": "query",
-  "resourceType": "gameserver",
-  "namespace": "game-servers",
-  "labelSelector": {
-    "agones.dev/fleet": "my-fleet",
-    "map": "de_dust2"
-  },
-  "annotationSelector": {
-    "currentPlayers": "32",
-    "status": "available"
-  },
-  "statusQuery": {
-    "jsonPath": "status.state",
-    "expectedValues": ["Ready", "Allocated"]
-  }
-}
+{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}
 ```
 
-**Success Response**:
 ```json
-{"token": "550e8400-e29b-41d4-a716-446655440000"}
+{"status":"ready","server":"tutorial-0","ports":{"default":7777}}
 ```
 
-**Error Response**:
-```json
-{"error": "No matching resources found"}
-```
+After `ready`, send application datagrams directly to the director's returned
+UDP port. Query success is not proof of actual player connection. There is no
+routing token, UDP setup packet, or reset command.
 
-### Data Proxy (UDP :7777)
+## Testing
 
-**First Packet** (Session Establishment):
-```
-[token-string]
-```
-
-**Control Packet** (Session Reset):
-```
-[0xFF 0xFF 0xFF 0xFF 0x52 0x45 0x53 0x45 0x54][new-token-string]
-```
-
-**Data Packets**:
-```
-[your-application-data]
-```
-
----
-
-## 🔧 Configuration Quick Reference
-
-```yaml
-queryPort: 9000                    # TCP query port
-dataPort: 7777                     # UDP data port
-tokenTTLSeconds: 30                # Token validity
-sessionTimeoutSeconds: 300         # Session timeout
-controlPacketMagicBytes: "FFFFFFFF5245534554" # Magic bytes (hex)
-
-defaultEndpoint:
-  resourceType: "gameserver"
-  namespace: "default"
-  # Labels: Static config (server-side filtering)
-  labelSelector:
-    agones.dev/fleet: "my-fleet"
-    map: "de_dust2"
-  # Annotations: Dynamic data (client-side filtering)
-  annotationSelector:
-    currentPlayers: "32"
-    status: "available"
-  statusQuery:
-    jsonPath: "status.state"
-    expectedValues: ["Ready"]
-
-resourceQueryMapping:
-  gameserver:
-    group: "agones.dev"
-    version: "v1"
-    resource: "gameservers"
-    addressPath: "status.address"
-    portName: "default"
-```
-
----
-
-## 🧪 Testing Quick Reference
-
-### Unit Tests
 ```bash
-cargo test                              # All tests
-cargo test test_token_generation        # Specific test
-cargo test -- --nocapture               # With output
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
-### Integration Test
-```bash
-# Terminal 1: Port-forward
-kubectl port-forward -n udp-director svc/udp-director 9000:9000 7777:7777
-
-# Terminal 2: Test query
-echo '{"resourceType":"gameserver","namespace":"game-servers"}' | nc localhost 9000
-
-# Terminal 3: Test data
-echo "test-token-here" | nc -u localhost 7777
-```
-
-### Load Test
-```bash
-# Query server
-echo "POST http://localhost:9000" | vegeta attack -rate=100 -duration=10s -body=query.json | vegeta report
-
-# UDP throughput
-iperf3 -c localhost -u -p 7777 -b 10M -t 30
-```
-
----
+See [Testing](Testing.md) for the real-socket query/forwarding test and manual
+verification with a running UDP backend.
 
 ## 🐛 Debug Commands
 
@@ -193,7 +100,7 @@ kubectl exec -n udp-director <pod> -- tcpdump -i any -n port 7777
 | Module | Purpose | Key Types |
 |--------|---------|-----------|
 | `config.rs` | Configuration management | `Config`, `ResourceMapping` |
-| `token_cache.rs` | Token storage with TTL | `TokenCache`, `TokenTarget` |
+| `characters.rs` | Pod character metadata lookup | `Character`, `CharacterStatus` |
 | `session.rs` | Session state management | `SessionManager`, `Session` |
 | `k8s_client.rs` | Kubernetes API client | `K8sClient`, `StatusQuery` |
 | `query_server.rs` | TCP query endpoint | `QueryServer`, `QueryRequest` |
@@ -225,38 +132,15 @@ kubectl exec -n udp-director <pod> -- tcpdump -i any -n port 7777
 | moka | 0.12 | TTL cache |
 | dashmap | 6.1 | Concurrent HashMap |
 | serde_json | 1.0 | JSON serialization |
-| uuid | 1.11 | Token generation |
 | tracing | 0.1 | Logging |
 
 ---
 
-## 🎯 Common Patterns
+## Client example
 
-### Query for Server
-```rust
-let query = json!({
-    "resourceType": "gameserver",
-    "namespace": "game-servers"
-});
-let token = tcp_query(director_ip, 9000, query)?;
-```
-
-### Establish Session
-```rust
-let socket = UdpSocket::bind("0.0.0.0:0")?;
-socket.connect((director_ip, 7777))?;
-socket.send(token.as_bytes())?;
-```
-
-### Reset Session
-```rust
-let magic = hex::decode("FFFFFFFF5245534554")?;
-let mut packet = magic;
-packet.extend_from_slice(new_token.as_bytes());
-socket.send(&packet)?;
-```
-
----
+See [client_example.rs](../examples/client_example.rs) for the TCP query and
+subsequent UDP connection sequence. A successful new query changes the selected
+forwarding target.
 
 ## 📈 Performance Targets
 
@@ -279,8 +163,6 @@ socket.send(&packet)?;
 - [ ] Services have matching selector labels
 - [ ] LoadBalancer has external IP
 - [ ] Firewall allows UDP 7777 and TCP 9000
-- [ ] Token used within TTL window (30s)
-- [ ] Magic bytes match configuration
 
 ---
 
@@ -317,5 +199,4 @@ socket.send(&packet)?;
 ### Networking Concepts
 - UDP stateful proxying
 - Session management
-- Token-based authentication
 - Control vs data plane separation

@@ -220,6 +220,8 @@ mod tests {
 
         let config = crate::config::Config {
             query_port: 9000,
+            character_label_prefix: "characters.udp-director.io".into(),
+            disconnect_annotation: "udp-director.io/disconnected-at".into(),
             data_port: Some(7777),
             data_ports: None,
             default_endpoint: crate::config::DefaultEndpoint {
@@ -229,12 +231,9 @@ mod tests {
                 annotation_selector: None,
                 status_query: None,
             },
-            token_ttl_seconds: 30,
             session_timeout_seconds: 300,
-            control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            reservation_only: false,
         };
 
         let k8s_client = K8sClient::new().await.unwrap();

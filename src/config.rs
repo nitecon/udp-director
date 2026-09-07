@@ -38,6 +38,14 @@ pub struct Config {
     /// Port for the Phase 1 TCP Query Server
     pub query_port: u16,
 
+    /// DNS prefix for one character-status label per character.
+    #[serde(default = "default_character_label_prefix")]
+    pub character_label_prefix: String,
+
+    /// Pod annotation containing a JSON character-ID -> RFC3339 disconnect-time map.
+    #[serde(default = "default_disconnect_annotation")]
+    pub disconnect_annotation: String,
+
     /// Port for the Phase 2 TCP/UDP Data Proxy (deprecated, use data_ports)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_port: Option<u16>,
@@ -46,17 +54,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_ports: Option<Vec<DataPortConfig>>,
 
-    /// Default endpoint query to use if no token is provided
+    /// Default endpoint query for clients without a query session
     pub default_endpoint: DefaultEndpoint,
-
-    /// How long a token is valid for lookup (in seconds)
-    pub token_ttl_seconds: u64,
 
     /// How long a data proxy session can be inactive before being torn down (in seconds)
     pub session_timeout_seconds: u64,
-
-    /// Magic byte sequence (as a hex string) that prefixes a "Control Packet"
-    pub control_packet_magic_bytes: String,
 
     /// Defines how client queries map to k8s resources
     pub resource_query_mapping: HashMap<String, ResourceMapping>,
@@ -64,10 +66,13 @@ pub struct Config {
     /// Load balancing configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_balancing: Option<LoadBalancingConfig>,
+}
 
-    /// Require a controller reservation before any data route is installed.
-    #[serde(default)]
-    pub reservation_only: bool,
+fn default_character_label_prefix() -> String {
+    "characters.udp-director.io".into()
+}
+fn default_disconnect_annotation() -> String {
+    "udp-director.io/disconnected-at".into()
 }
 
 /// Default endpoint query configuration
@@ -237,10 +242,6 @@ impl Config {
             anyhow::bail!("resource_query_mapping must not be empty");
         }
 
-        // Validate hex string for magic bytes
-        hex::decode(&self.control_packet_magic_bytes)
-            .with_context(|| "control_packet_magic_bytes must be a valid hex string")?;
-
         Ok(())
     }
 
@@ -252,13 +253,6 @@ impl Config {
     /// Get the load balancing configuration (or default)
     pub fn get_load_balancing(&self) -> LoadBalancingConfig {
         self.load_balancing.clone().unwrap_or_default()
-    }
-
-    /// Get the decoded magic bytes
-    #[allow(dead_code)]
-    pub fn get_magic_bytes(&self) -> Result<Vec<u8>> {
-        hex::decode(&self.control_packet_magic_bytes)
-            .with_context(|| "Failed to decode control_packet_magic_bytes")
     }
 }
 
@@ -273,6 +267,8 @@ mod tests {
 
         let config = Config {
             query_port: 9000,
+            character_label_prefix: default_character_label_prefix(),
+            disconnect_annotation: default_disconnect_annotation(),
             data_port: Some(7777),
             data_ports: None,
             default_endpoint: DefaultEndpoint {
@@ -285,12 +281,9 @@ mod tests {
                     expected_values: vec!["Ready".to_string()],
                 }),
             },
-            token_ttl_seconds: 30,
             session_timeout_seconds: 300,
-            control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            reservation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
@@ -305,6 +298,8 @@ mod tests {
 
         let config = Config {
             query_port: 9000,
+            character_label_prefix: default_character_label_prefix(),
+            disconnect_annotation: default_disconnect_annotation(),
             data_port: Some(7777),
             data_ports: None,
             default_endpoint: DefaultEndpoint {
@@ -314,45 +309,14 @@ mod tests {
                 annotation_selector: None,
                 status_query: None, // No status filtering
             },
-            token_ttl_seconds: 30,
             session_timeout_seconds: 300,
-            control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
             resource_query_mapping: HashMap::new(),
             load_balancing: None,
-            reservation_only: false,
         };
 
         let endpoint = config.get_default_endpoint();
         assert_eq!(endpoint.resource_type, "gameserver");
         assert_eq!(endpoint.namespace, "game-servers");
         assert!(endpoint.status_query.is_none());
-    }
-
-    #[test]
-    fn test_magic_bytes_decode() {
-        let config = Config {
-            query_port: 9000,
-            data_port: Some(7777),
-            data_ports: None,
-            default_endpoint: DefaultEndpoint {
-                resource_type: "gameserver".to_string(),
-                namespace: "default".to_string(),
-                label_selector: None,
-                annotation_selector: None,
-                status_query: None,
-            },
-            token_ttl_seconds: 30,
-            session_timeout_seconds: 300,
-            control_packet_magic_bytes: "FFFFFFFF5245534554".to_string(),
-            resource_query_mapping: HashMap::new(),
-            load_balancing: None,
-            reservation_only: false,
-        };
-
-        let magic_bytes = config.get_magic_bytes().unwrap();
-        assert_eq!(
-            magic_bytes,
-            vec![0xFF, 0xFF, 0xFF, 0xFF, 0x52, 0x45, 0x53, 0x45, 0x54]
-        );
     }
 }

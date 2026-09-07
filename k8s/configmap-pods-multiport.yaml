@@ -6,13 +6,10 @@ metadata:
 data:
   config.yaml: |
     # UDP Director Configuration - Multi-Port Pod Routing
-    # Single token provides access to multiple ports
     # Demonstrates label and annotation filtering
     
     queryPort: 9000
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
-    controlPacketMagicBytes: "FFFFFFFF5245534554"
 
     # Multi-port configuration
     dataPorts:

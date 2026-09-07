@@ -6,7 +6,7 @@ UDP Director supports intelligent load balancing to distribute client connection
 
 ## Overview
 
-When clients connect without a token (using the default endpoint), the proxy needs to select which backend to route them to. Load balancing strategies determine how this selection is made to ensure optimal distribution of traffic.
+When clients connect without a query-established route (using the default endpoint), the proxy needs to select which backend to route them to. Load balancing strategies determine how this selection is made to ensure optimal distribution of traffic.
 
 ## Strategies
 

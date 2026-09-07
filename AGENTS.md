@@ -5,6 +5,12 @@ This is the repository owner's binding architecture directive, recorded on
 document, build, and deployment decision in this project. AGENTS.md and CLAUDE.md
 must carry the same rules; update both together.
 
+The recovery goal is to remove the existing ticketing system and internal
+dependencies from this public open-source project. Use udp-director's TCP-query
+and UDP-routing capabilities with native Kubernetes Pod labels and reconciliation.
+Do not merely rename, wrap, or preserve ticketing behind a generic interface.
+Agents must actively stop changes that reintroduce it under any name.
+
 ## Required connection and occupancy model
 
 1. The backend API owns authoritative persistent game data and region endpoint

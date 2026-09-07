@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use time::OffsetDateTime;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio::time::interval;
@@ -122,12 +121,11 @@ pub struct Session {
     /// same IP (for example during application-level travel) from sharing a backend
     /// UDP flow and corrupting each other's packets.
     pub udp_sockets: HashMap<(u16, u16), SessionSocket>,
-    /// Exact Kubernetes Pod UID for controller-issued reservation routes.
-    pub pod_uid: Option<String>,
 }
 
 impl Session {
     /// Create a new session with a single port (backwards compatibility)
+    #[cfg(test)]
     pub fn new(target_addr: SocketAddr) -> Self {
         let mut port_mappings = HashMap::new();
         port_mappings.insert((target_addr.port(), Protocol::Udp), target_addr.port());
@@ -136,7 +134,6 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
-            pod_uid: None,
         }
     }
 
@@ -147,7 +144,6 @@ impl Session {
             port_mappings,
             last_activity: Instant::now(),
             udp_sockets: HashMap::new(),
-            pod_uid: None,
         }
     }
 
@@ -238,16 +234,13 @@ pub type SessionCleanupCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Session manager for tracking active client sessions with multi-port support.
 ///
-/// Legacy query sessions remain keyed by IP for backwards compatibility. Project
-/// X reservations are keyed by the gameplay `SocketAddr`, allowing multiple
-/// players behind one NAT address to hold independent exact-Pod routes.
+/// Query routes are keyed by client IP; forwarding sockets remain isolated by source port.
 #[derive(Clone)]
 pub struct SessionManager {
     sessions: Arc<DashMap<SessionKey, Session>>,
     timeout_seconds: u64,
     /// Optional callback to notify when sessions are cleaned up
     cleanup_callback: Option<SessionCleanupCallback>,
-    route_history: Arc<DashMap<String, OffsetDateTime>>,
 }
 
 impl SessionManager {
@@ -257,7 +250,6 @@ impl SessionManager {
             sessions: Arc::new(DashMap::new()),
             timeout_seconds,
             cleanup_callback: None,
-            route_history: Arc::new(DashMap::new()),
         };
 
         // Start cleanup task
@@ -307,7 +299,8 @@ impl SessionManager {
             .or_else(|| self.get_mut(&client_addr.ip()))
     }
 
-    /// Update or create a session (for session reset) - single port version
+    /// Single-port convenience constructor for session tests.
+    #[cfg(test)]
     pub async fn upsert(&self, client_addr: SocketAddr, target_addr: SocketAddr) {
         let client_ip = client_addr.ip();
         let key = SessionKey::LegacyIp(client_ip);
@@ -346,60 +339,6 @@ impl SessionManager {
             target_ip,
             port_mappings.len()
         );
-    }
-
-    /// Install a route bound to one exact reservation target Pod UID.
-    pub async fn upsert_reservation_route(
-        &self,
-        client_addr: SocketAddr,
-        target_ip: String,
-        port_mappings: HashMap<(u16, Protocol), u16>,
-        pod_uid: String,
-    ) {
-        let key = SessionKey::ExactSocket(client_addr);
-        if let Some(mut old_session) = self.sessions.get_mut(&key) {
-            old_session.shutdown_sockets().await;
-        }
-
-        let mut session = Session::new_multi_port(target_ip, port_mappings);
-        session.pod_uid = Some(pod_uid.clone());
-        self.sessions.insert(key, session);
-        self.route_history
-            .insert(pod_uid, OffsetDateTime::now_utc());
-    }
-
-    /// Install a reservation route using the legacy IP key.
-    ///
-    /// This exists only for compatibility with query-port clients whose TCP
-    /// source port cannot match their subsequent gameplay UDP source port.
-    pub async fn upsert_reservation_legacy(
-        &self,
-        client_addr: SocketAddr,
-        target_ip: String,
-        port_mappings: HashMap<(u16, Protocol), u16>,
-        pod_uid: String,
-    ) {
-        self.upsert_multi_port(client_addr, target_ip, port_mappings)
-            .await;
-        if let Some(mut session) = self
-            .sessions
-            .get_mut(&SessionKey::LegacyIp(client_addr.ip()))
-        {
-            session.pod_uid = Some(pod_uid.clone());
-        }
-        self.route_history
-            .insert(pod_uid, OffsetDateTime::now_utc());
-    }
-
-    /// Return the route count and last binding time, or `None` after an unknown restart.
-    pub fn reservation_route_status(&self, pod_uid: &str) -> Option<(usize, OffsetDateTime)> {
-        let last_new = *self.route_history.get(pod_uid)?;
-        let active = self
-            .sessions
-            .iter()
-            .filter(|entry| entry.value().pod_uid.as_deref() == Some(pod_uid))
-            .count();
-        Some((active, last_new))
     }
 
     /// Touch a session to update its last activity
@@ -635,92 +574,5 @@ mod tests {
         assert_eq!(session.udp_sockets.len(), 2);
 
         session.shutdown_sockets().await;
-    }
-
-    #[tokio::test]
-    async fn reservation_routes_are_exact_and_preserved_during_drain() {
-        let manager = SessionManager::new(300);
-        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let mut ports = HashMap::new();
-        ports.insert((7777, Protocol::Udp), 7777);
-        manager
-            .upsert_reservation_route(
-                client_addr,
-                "10.0.0.1".to_string(),
-                ports,
-                "exact-pod-uid".to_string(),
-            )
-            .await;
-
-        // Drain only blocks future controller reservations. The established
-        // route remains pinned until its normal session timeout.
-        let (active, _) = manager.reservation_route_status("exact-pod-uid").unwrap();
-        assert_eq!(active, 1);
-        assert_eq!(
-            manager
-                .get_by_addr(&client_addr)
-                .unwrap()
-                .pod_uid
-                .as_deref(),
-            Some("exact-pod-uid")
-        );
-        assert!(
-            manager
-                .reservation_route_status("different-pod-uid")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn reservation_route_history_reports_zero_after_route_ends() {
-        let manager = SessionManager::new(300);
-        let client_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        manager
-            .upsert_reservation_route(
-                client_addr,
-                "10.0.0.1".to_string(),
-                HashMap::new(),
-                "pod-uid".to_string(),
-            )
-            .await;
-        manager.clear_all().await;
-
-        let (active, _) = manager.reservation_route_status("pod-uid").unwrap();
-        assert_eq!(active, 0);
-    }
-
-    #[tokio::test]
-    async fn reservation_routes_are_isolated_by_exact_socket_behind_one_nat() {
-        let manager = SessionManager::new(300);
-        let first: SocketAddr = "203.0.113.10:40001".parse().unwrap();
-        let second: SocketAddr = "203.0.113.10:40002".parse().unwrap();
-        let mut ports = HashMap::new();
-        ports.insert((7777, Protocol::Udp), 7777);
-
-        manager
-            .upsert_reservation_route(
-                first,
-                "10.0.0.1".to_string(),
-                ports.clone(),
-                "pod-one".to_string(),
-            )
-            .await;
-        manager
-            .upsert_reservation_route(second, "10.0.0.2".to_string(), ports, "pod-two".to_string())
-            .await;
-
-        assert_eq!(manager.get_by_addr(&first).unwrap().target_ip, "10.0.0.1");
-        assert_eq!(manager.get_by_addr(&second).unwrap().target_ip, "10.0.0.2");
-        assert_eq!(manager.count(), 2);
-    }
-
-    #[tokio::test]
-    async fn reservation_route_state_is_unknown_after_restart() {
-        let manager = SessionManager::new(300);
-        assert!(
-            manager
-                .reservation_route_status("pod-from-before-restart")
-                .is_none()
-        );
     }
 }

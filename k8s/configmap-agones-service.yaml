@@ -11,9 +11,7 @@ data:
     
     queryPort: 9000
     dataPort: 7777
-    tokenTtlSeconds: 30
     sessionTimeoutSeconds: 300
-    controlPacketMagicBytes: "FFFFFFFF5245534554"
 
     # Default endpoint - targets Agones GameServers via Services
     defaultEndpoint:

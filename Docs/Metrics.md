@@ -21,7 +21,7 @@ UDP Director exposes Prometheus-compatible metrics for monitoring and observabil
 
 #### `udp_director_total_sessions`
 - **Type**: Counter
-- **Labels**: `session_type` (token, default)
+- **Labels**: `session_type` (query, default)
 - **Description**: Total number of sessions created since startup
 - **Use Case**: Track session creation rate
 
@@ -90,19 +90,6 @@ UDP Director exposes Prometheus-compatible metrics for monitoring and observabil
 - **Buckets**: 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s
 - **Description**: Duration of query processing
 - **Use Case**: Track query performance
-
-### Token Cache Metrics
-
-#### `udp_director_token_cache_size`
-- **Type**: Gauge
-- **Description**: Number of tokens currently in cache
-- **Use Case**: Monitor cache utilization
-
-#### `udp_director_token_cache_hits_total`
-- **Type**: Counter
-- **Labels**: `result` (hit, miss)
-- **Description**: Token cache hits and misses
-- **Use Case**: Calculate cache hit rate
 
 ### Kubernetes Metrics
 
@@ -210,12 +197,6 @@ rate(udp_director_packets_received_total[1m])
 **Bandwidth Usage** (bytes/sec):
 ```promql
 rate(udp_director_bytes_received_total[1m]) + rate(udp_director_bytes_sent_total[1m])
-```
-
-**Cache Hit Rate**:
-```promql
-rate(udp_director_token_cache_hits_total{result="hit"}[5m]) / 
-rate(udp_director_token_cache_hits_total[5m])
 ```
 
 **Query Latency** (95th percentile):

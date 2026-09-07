@@ -153,9 +153,9 @@ annotationSelector:
    - Filters by annotations
    - Returns 2 servers with exactly 32 players
 
-4. Load Balancer Selection:
-   - Selects best server from 2 candidates
-   - Returns token to client
+4. Query Route Selection:
+   - Selects the first matching resource
+   - Installs forwarding and returns ready with public director ports
 ```
 
 ## API Examples
@@ -183,8 +183,8 @@ echo '{
 
 ```json
 {
-  "token": "550e8400-e29b-41d4-a716-446655440000",
-  "address": "10.244.1.44",
+  "status": "ready",
+  "server": "game-server-0",
   "ports": {
     "game-udp": 7777,
     "game-tcp": 7777

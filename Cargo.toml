@@ -1,6 +1,6 @@
 [package]
 name = "udp-director"
-version = "0.2.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.85"
 
@@ -27,12 +27,6 @@ moka = { version = "0.12", features = ["future"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# UUID generation for tokens
-uuid = { version = "1.11", features = ["v4", "fast-rng"] }
-
-# Hex encoding/decoding for magic bytes
-hex = "0.4"
 
 # Async utilities
 futures = "0.3"
