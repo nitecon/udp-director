@@ -49,14 +49,14 @@ Pod character labels, and the current shared-NAT limitation. Use
 [config.example.yaml](../config.example.yaml) for the minimal Pod configuration.
 
 ```json
-{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}
+{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}
 ```
 
 ```json
-{"status":"ready","server":"tutorial-0","ports":{"default":7777}}
+{"status":"Allocated","server":"opaque-server-id","ports":{"default":7777}}
 ```
 
-After `ready`, send application datagrams directly to the director's returned
+After `Allocated`, send application datagrams directly to the director's returned
 UDP port. Query success is not proof of actual player connection. There is no
 routing token, UDP setup packet, or reset command.
 

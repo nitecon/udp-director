@@ -18,8 +18,11 @@ Agents must actively stop changes that reintroduce it under any name.
    connect to. It must not select a player's server Pod, issue routing
    credentials, or store per-player routing state.
 2. The client sends a TCP access query to that region's udp-director.
-3. The controller selects available capacity and sets the appropriate Pod labels
-   for that client's target assignment.
+3. The director handles the initial access request internally: selects available
+   capacity and writes the requesting character's `Allocated` Pod label before
+   returning success. The occupancy controller owns subsequent `Used`,
+   `Disconnected`, and disconnect-retention cleanup from actual server events.
+   This is the owner's map-and-friends correction to the initial assignment boundary.
 4. The client connects over UDP. udp-director automatically routes the connection
    to the labeled target Pod. Preserve the TCP-query / UDP-routing design.
 5. Actual player connection and disconnection events drive occupancy. The
@@ -28,8 +31,7 @@ Agents must actively stop changes that reintroduce it under any name.
 6. Kubernetes provides lifecycle and durability through native reconciliation,
    labels, replacement, and scaling. Do not recreate these capabilities through
    a parallel application-level orchestration system. udp-director remains the
-   routing data plane; the controller manages capacity, occupancy, and
-   assignment labels.
+   routing data plane; the controller manages occupancy and assignment lifecycle.
 
 A TCP access query or an issued assignment is not proof that a player connected.
 Do not substitute query counts, issued tokens, route counts, packet counts, or
@@ -125,3 +127,12 @@ implementation convenience do not justify complexity or override these laws.
 Even an approved implementation task does not authorize changing the
 architecture. If its contract conflicts with these boundaries, STOP and ask
 the owner for clarification before implementing it.
+
+## Requestor boundary
+
+Clients send map, character ID, and optional friend IDs. Character lookup uses
+map and character IDs. Kubernetes namespaces, resource types, selectors, Pod
+names, resource mappings, and label keys are deployment internals and must never
+be required in client requests. Keep them in director configuration. Return an
+opaque server identifier and connection status. Do not restore the raw Kubernetes
+query interface as a compatibility path.

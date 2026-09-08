@@ -25,8 +25,7 @@ pub struct Character {
 
 #[derive(Debug, Serialize)]
 pub struct CharacterServer {
-    pub namespace: String,
-    pub name: String,
+    pub server: String,
     pub characters: Vec<Character>,
 }
 

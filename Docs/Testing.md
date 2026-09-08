@@ -14,9 +14,13 @@ cargo clippy --all-targets -- -D warnings
 
 The `tcp_label_query_then_unmodified_udp_reaches_selected_pod` test uses real
 local TCP and UDP sockets with a mocked Kubernetes Pod-list response. It checks
-label selection, the `ready` response, forwarding of unmodified gameplay bytes,
+friend lookup, friend preference over an empty server, the Allocated label patch,
+the `Allocated` response, forwarding of unmodified gameplay bytes,
 and the backend reply. It does not prove live Kubernetes deployment or controller
 occupancy behavior.
+
+Capacity exhaustion and resource-version conflicts return errors without installing
+a route.
 
 Character tests cover valid label names, the three character states, requested
 ID filtering, and the 120-second disconnect visibility boundary. Query tests
@@ -32,13 +36,13 @@ declaring a UDP container port does not start a UDP listener.
 From the gameplay client's host, query the director:
 
 ```bash
-printf '%s\n' '{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}' | nc <DIRECTOR_IP> 9000
+printf '%s\n' '{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}' | nc <DIRECTOR_IP> 9000
 ```
 
 Expect a response such as:
 
 ```json
-{"status":"ready","server":"tutorial-0","ports":{"default":7777}}
+{"status":"Allocated","server":"opaque-server-id","ports":{"default":7777}}
 ```
 
 Send normal application datagrams to that same director's returned UDP port and
@@ -59,7 +63,7 @@ Apply the metadata representation documented in [Query API](QueryAPI.md) to a
 Ready Pod, then send:
 
 ```json
-{"type":"characterList","namespace":"game-servers","characterIds":["friend-1"]}
+{"type":"characterList","map":"tutorial","characterIds":["friend-1"]}
 ```
 
 Verify that only matching visible characters are returned. A disconnected
@@ -71,7 +75,7 @@ those mutations from actual game-server events.
 
 - No matching resource: check namespace, configured resource type, selectors,
   Pod readiness, Pod IP, and the named container port.
-- No gameplay reply: check the `ready` response, director UDP exposure, backend
+- No gameplay reply: check the `Allocated` response, director UDP exposure, backend
   listener, source IP, and forwarding logs.
 - Missing character: check the label prefix, exact status spelling, requested ID,
   and valid disconnect timestamp within the reconnect window.

@@ -1,4 +1,4 @@
-//! Query a Pod by labels, then send gameplay directly through the director.
+//! Query a map with optional friends, then send gameplay directly through the director.
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
@@ -6,8 +6,8 @@ use std::net::{TcpStream, UdpSocket};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut query = TcpStream::connect("127.0.0.1:9000")?;
     let request = json!({
-        "type": "query", "resourceType": "pod", "namespace": "game-servers",
-        "labelSelector": {"map": "tutorial"}
+        "type": "query", "map": "tutorial", "characterId": "me",
+        "friendIds": ["friend-1"]
     });
     writeln!(query, "{request}")?;
     let mut response = String::new();

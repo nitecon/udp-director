@@ -6,10 +6,10 @@ query followed by direct gameplay forwarding through the regional director.
 
 ## Connection and character lookup
 
-A server query uses configured Kubernetes resource mappings and selectors,
-installs a forwarding route, and returns `ready` with the selected server name
-and public director ports. Gameplay packets then flow through the director
-without token redemption, setup datagrams, or reset packets.
+A server query accepts map, joining character ID, and optional friend IDs. The
+director uses its own configured Kubernetes mapping, chooses available capacity
+with friend preference, writes `Allocated`, installs forwarding, and returns a
+status with public director ports. Clients never supply Kubernetes fields.
 
 The `characterList` query reads native Pod labels to find servers containing
 requested characters. Labels represent `Allocated`, `Used`, and `Disconnected`;
@@ -43,11 +43,10 @@ UDP forwarding to an actual local backend socket, including the reply. Character
 and request-framing tests cover filtering, disconnect expiry, and fragmented
 requests. See [Testing](Testing.md) for commands and verification limits.
 
-The v2.0.0 gateway contract documents the implemented behavior. Initial
-`Allocated` label integration and shared-NAT route identity remain unresolved. Current query routing is
-keyed by TCP peer IP, so separate players sharing a public IP cannot independently
-select different targets. Local tests do not establish live cluster readiness or
-controller lifecycle integration. Recovery is not yet complete.
+The v3.0.0 contract replaces the raw infrastructure query. The socket test checks
+friend lookup, preference over an empty server, the initial label patch, and
+bidirectional gameplay forwarding. The existing shared-NAT route limitation
+remains documented; live controller occupancy integration is separate.
 
 ## References
 

@@ -7,6 +7,15 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-09-07
+
+Replace client Kubernetes resource queries with map, character ID, and optional
+friend IDs. Director configuration owns namespaces, selectors, and mappings.
+Character lookup accepts map and character IDs. Access prefers friends, checks
+capacity, patches the initial Allocated label with a resource-version condition,
+and installs forwarding before success. Raw infrastructure fields are rejected.
+Pod patch permission is now required. The IP-based route limitation is unchanged.
+
 ## [2.0.0] - 2026-09-07
 
 Internal and product-specific dependencies are being removed from this public

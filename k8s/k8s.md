@@ -78,7 +78,7 @@ ports:
 **Example Query Response**:
 ```json
 {
-  "status": "ready",
+  "status": "Allocated",
   "server": "game-server-0",
   "ports": {
     "game-udp": 7777,

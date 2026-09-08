@@ -38,6 +38,11 @@ pub struct Config {
     /// Port for the Phase 1 TCP Query Server
     pub query_port: u16,
 
+    #[serde(default = "default_map_label")]
+    pub map_label: String,
+    #[serde(default = "default_capacity")]
+    pub max_characters_per_server: usize,
+
     /// DNS prefix for one character-status label per character.
     #[serde(default = "default_character_label_prefix")]
     pub character_label_prefix: String,
@@ -66,6 +71,13 @@ pub struct Config {
     /// Load balancing configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub load_balancing: Option<LoadBalancingConfig>,
+}
+
+fn default_map_label() -> String {
+    "map".into()
+}
+fn default_capacity() -> usize {
+    128
 }
 
 fn default_character_label_prefix() -> String {
@@ -267,6 +279,8 @@ mod tests {
 
         let config = Config {
             query_port: 9000,
+            map_label: "map".into(),
+            max_characters_per_server: 128,
             character_label_prefix: default_character_label_prefix(),
             disconnect_annotation: default_disconnect_annotation(),
             data_port: Some(7777),
@@ -298,6 +312,8 @@ mod tests {
 
         let config = Config {
             query_port: 9000,
+            map_label: "map".into(),
+            max_characters_per_server: 128,
             character_label_prefix: default_character_label_prefix(),
             disconnect_annotation: default_disconnect_annotation(),
             data_port: Some(7777),

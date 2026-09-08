@@ -33,24 +33,22 @@ impl K8sClient {
         Ok(Self { client })
     }
 
-    pub async fn list_pods(
-        &self,
-        namespace: &str,
-        labels: Option<&HashMap<String, String>>,
-    ) -> Result<Vec<Pod>> {
-        let selector = labels
-            .map(|labels| {
-                labels
-                    .iter()
-                    .map(|(key, value)| format!("{key}={value}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-        let pods = Api::<Pod>::namespaced(self.client.clone(), namespace)
-            .list(&ListParams::default().labels(&selector))
+    pub async fn allocate_character(&self, namespace: &str, pod: &Pod, key: &str) -> Result<()> {
+        let name = pod.metadata.name.as_deref().context("Pod has no name")?;
+        let version = pod
+            .metadata
+            .resource_version
+            .as_deref()
+            .context("Pod has no resource version")?;
+        let body = serde_json::json!({"metadata": {"resourceVersion": version, "labels": {key: "Allocated"}}});
+        Api::<Pod>::namespaced(self.client.clone(), namespace)
+            .patch(
+                name,
+                &kube::api::PatchParams::default(),
+                &kube::api::Patch::Merge(body),
+            )
             .await?;
-        Ok(pods.items.into_iter().filter(Self::pod_ready).collect())
+        Ok(())
     }
 
     pub(crate) fn pod_ready(pod: &Pod) -> bool {

@@ -14,7 +14,7 @@ This document provides in-depth technical details for developers and operators w
 
 [Query API](QueryAPI.md) defines the TCP JSON contract, character lookup, Pod
 metadata, and unresolved integration boundaries. A successful query installs a
-forwarding route and returns `ready` with public director ports. Application
+forwarding route and returns `Allocated` with public director ports. Application
 traffic then goes directly through those ports without a control datagram.
 
 ## Session Management Internals
@@ -40,8 +40,9 @@ controller's lifecycle contract.
 1. Parse the TCP JSON query and resolve its configured resource mapping.
 2. Query Kubernetes with the label selector and apply annotation/status filters.
 3. For core Pods, require Running, Ready, nonterminating state and a Pod IP.
-4. Select the first matching resource and extract its configured backend ports.
-5. Install forwarding for the client and return the resource name with public
+4. Prefer an existing character assignment, then friends and available capacity.
+   Extract the selected backend ports and conditionally patch Allocated.
+5. Install forwarding for the client and return an opaque server identity with public
    director ports. A failed query does not install a new route.
 
 ### JSONPath Status Queries

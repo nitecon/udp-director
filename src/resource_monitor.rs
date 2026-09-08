@@ -220,6 +220,8 @@ mod tests {
 
         let config = crate::config::Config {
             query_port: 9000,
+            map_label: "map".into(),
+            max_characters_per_server: 128,
             character_label_prefix: "characters.udp-director.io".into(),
             disconnect_annotation: "udp-director.io/disconnected-at".into(),
             data_port: Some(7777),

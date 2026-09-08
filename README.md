@@ -39,10 +39,10 @@ Traditional UDP load balancers are stateless and can't intelligently route clien
 
 ## How It Works
 
-1. Send a TCP query to the regional director on port 9000 with Kubernetes label selectors.
-2. The director selects a matching Ready Pod and establishes the forwarding route.
+1. Send a TCP query to the regional director on port 9000 with map, joining character ID, and optional friend IDs.
+2. The director selects available capacity with friend preference, writes Allocated, and establishes forwarding.
 3. Wait for the query response, then send gameplay directly over UDP through the same director.
-4. Use TCP character-list queries to find Pods containing friends. Character status lives on Pod labels; actual server connection events drive occupancy.
+4. Use TCP character-list queries to find servers containing friends. Character status lives on Pod labels; actual server connection events drive occupancy.
 
 No routing ticket, token redemption, or UDP setup exchange is required.
 See [Query and Connection API](Docs/QueryAPI.md) for the wire format and routing constraints.
@@ -105,8 +105,8 @@ kubectl set image deployment/udp-director \
 ### Client Integration Example
 
 ```bash
-printf '%s\n' '{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}' | nc <regional-director> 9000
-# {"status":"ready","server":"tutorial-0","ports":{"default":7777}}
+printf '%s\n' '{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}' | nc <regional-director> 9000
+# {"status":"Allocated","server":"opaque-server-id","ports":{"default":7777}}
 
 # After the query succeeds, send gameplay using the same director endpoint.
 printf 'gameplay' | nc -u <regional-director> 7777

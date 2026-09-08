@@ -15,31 +15,21 @@ use crate::session::SessionManager;
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
+    deny_unknown_fields,
     tag = "type"
 )]
 pub enum QueryRequest {
-    /// Read-only search for Pods containing any requested character.
     CharacterList {
-        namespace: String,
+        map: String,
+        #[serde(default)]
         character_ids: Vec<String>,
-        label_selector: Option<HashMap<String, String>>,
     },
-    /// Query for a resource and establish a session
     Query {
-        resource_type: String,
-        namespace: String,
-        status_query: Option<StatusQueryDto>,
-        label_selector: Option<HashMap<String, String>>,
-        annotation_selector: Option<HashMap<String, String>>,
+        map: String,
+        character_id: String,
+        #[serde(default)]
+        friend_ids: Vec<String>,
     },
-}
-
-/// Status query DTO
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StatusQueryDto {
-    pub json_path: String,
-    pub expected_values: Vec<String>,
 }
 
 /// Query response to client (single port - backwards compatibility)
@@ -146,239 +136,160 @@ impl QueryServer {
         request: QueryRequest,
         client_addr: std::net::SocketAddr,
     ) -> QueryResponse {
-        match request {
-            QueryRequest::CharacterList {
-                namespace,
-                character_ids,
-                label_selector,
-            } => {
-                if character_ids.iter().any(|id| !valid_character_id(id)) {
-                    return QueryResponse::Error {
-                        error: "Invalid character ID for a Kubernetes label".into(),
-                    };
+        let result = self.process_access(request, client_addr).await;
+        match result {
+            Ok(response) => response,
+            Err(error) => {
+                error!("Access query failed: {error:#}");
+                QueryResponse::Error {
+                    error: "Unable to establish route".into(),
                 }
-                let pods = match self
-                    .k8s_client
-                    .list_pods(&namespace, label_selector.as_ref())
-                    .await
-                {
-                    Ok(pods) => pods,
-                    Err(error) => {
-                        return QueryResponse::Error {
-                            error: error.to_string(),
-                        };
-                    }
-                };
-                let now = time::OffsetDateTime::now_utc();
-                let mut servers: Vec<_> = pods
-                    .into_iter()
-                    .filter_map(|pod| {
-                        let characters = characters_on_pod(&pod, &self.config, &character_ids, now);
-                        if characters.is_empty() {
-                            return None;
-                        }
-                        Some(CharacterServer {
-                            namespace: namespace.clone(),
-                            name: pod.metadata.name.unwrap_or_default(),
-                            characters,
-                        })
-                    })
-                    .collect();
-                servers.sort_by(|a, b| a.name.cmp(&b.name));
-                QueryResponse::CharacterList { servers }
-            }
-            QueryRequest::Query {
-                resource_type,
-                namespace,
-                status_query,
-                label_selector,
-                annotation_selector,
-            } => {
-                self.process_resource_query(
-                    resource_type,
-                    namespace,
-                    status_query,
-                    label_selector,
-                    annotation_selector,
-                    client_addr,
-                )
-                .await
             }
         }
     }
 
-    /// Process a resource query request
-    async fn process_resource_query(
+    async fn process_access(
         &self,
-        resource_type: String,
-        namespace: String,
-        status_query: Option<StatusQueryDto>,
-        label_selector: Option<HashMap<String, String>>,
-        annotation_selector: Option<HashMap<String, String>>,
+        request: QueryRequest,
         client_addr: std::net::SocketAddr,
-    ) -> QueryResponse {
-        let mapping = match self.config.resource_query_mapping.get(&resource_type) {
-            Some(m) => m,
-            None => {
-                return QueryResponse::Error {
-                    error: format!("Unknown resource type: {}", resource_type),
-                };
-            }
+    ) -> Result<QueryResponse> {
+        let (map, ids, character) = match request {
+            QueryRequest::CharacterList { map, character_ids } => (map, character_ids, None),
+            QueryRequest::Query {
+                map,
+                character_id,
+                friend_ids,
+            } => (map, friend_ids, Some(character_id)),
         };
-
-        let status_query_obj = status_query.as_ref().map(|sq| StatusQuery {
-            json_path: sq.json_path.clone(),
-            expected_values: sq.expected_values.clone(),
-        });
-
-        let resources = match self
-            .query_k8s_resources(
-                &resource_type,
-                &namespace,
-                &label_selector,
-                &annotation_selector,
-                mapping,
-                status_query_obj.as_ref(),
-            )
-            .await
+        if !valid_character_id(&map)
+            || ids.iter().any(|id| !valid_character_id(id))
+            || character.as_ref().is_some_and(|id| !valid_character_id(id))
         {
-            Ok(res) => res,
-            Err(e) => return e,
-        };
-
-        let selected_resource = &resources[0];
-        let resource_name = selected_resource
-            .metadata
-            .name
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        debug!("Selected resource: {}", resource_name);
-
-        // Check if multi-port configuration is available
-        if mapping.ports.is_some() {
-            // Multi-port approach
-            let (cluster_ip, ports_map) = match self
-                .extract_multi_port_target_info(
-                    selected_resource,
-                    mapping,
-                    &namespace,
-                    &resource_name,
-                )
-                .await
-            {
-                Ok(info) => info,
-                Err(e) => return e,
-            };
-
-            // Build port mappings for the selected target
-            let data_ports = self.config.get_data_ports();
-            let mut port_mappings = HashMap::new();
-
-            for data_port_config in &data_ports {
-                if let Some(target_port) = ports_map.get(&data_port_config.name) {
-                    port_mappings.insert(
-                        (data_port_config.port, data_port_config.protocol),
-                        *target_port,
-                    );
-                }
-            }
-
-            // Establish session immediately for this client
-            self.session_manager
-                .upsert_multi_port(client_addr, cluster_ip.clone(), port_mappings)
-                .await;
-
-            info!(
-                "Established multi-port route for {} -> {} ({} ports)",
-                client_addr,
-                resource_name,
-                ports_map.len()
-            );
-
-            QueryResponse::Success {
-                status: "ready".to_string(),
-                server: resource_name,
-                ports: self
-                    .config
-                    .get_data_ports()
-                    .into_iter()
-                    .map(|p| (p.name, p.port))
-                    .collect(),
-            }
-        } else {
-            // Single port approach (backwards compatibility)
-            let (cluster_ip, port) = match self
-                .extract_target_info(selected_resource, mapping, &namespace, &resource_name)
-                .await
-            {
-                Ok(info) => info,
-                Err(e) => return e,
-            };
-
-            let port_mappings = self
-                .config
-                .get_data_ports()
-                .into_iter()
-                .map(|p| ((p.port, p.protocol), port))
-                .collect();
-            self.session_manager
-                .upsert_multi_port(client_addr, cluster_ip, port_mappings)
-                .await;
-
-            QueryResponse::Success {
-                status: "ready".to_string(),
-                server: resource_name,
-                ports: self
-                    .config
-                    .get_data_ports()
-                    .into_iter()
-                    .map(|p| (p.name, p.port))
-                    .collect(),
-            }
+            return Ok(QueryResponse::Error {
+                error: "Invalid map or character ID".into(),
+            });
         }
-    }
-
-    /// Query Kubernetes for matching resources
-    async fn query_k8s_resources(
-        &self,
-        _resource_type: &str,
-        namespace: &str,
-        label_selector: &Option<HashMap<String, String>>,
-        annotation_selector: &Option<HashMap<String, String>>,
-        mapping: &crate::config::ResourceMapping,
-        status_query: Option<&StatusQuery>,
-    ) -> Result<Vec<kube::api::DynamicObject>, QueryResponse> {
-        let mut resources = self
+        let endpoint = &self.config.default_endpoint;
+        let mapping = self
+            .config
+            .resource_query_mapping
+            .get(&endpoint.resource_type)
+            .context("Missing server mapping")?;
+        anyhow::ensure!(
+            mapping.group.is_empty() && mapping.resource == "pods",
+            "Access requires a Pod mapping"
+        );
+        let mut labels = endpoint.label_selector.clone().unwrap_or_default();
+        labels.insert(self.config.map_label.clone(), map);
+        let status = endpoint.status_query.as_ref().map(|s| StatusQuery {
+            json_path: s.json_path.clone(),
+            expected_values: s.expected_values.clone(),
+        });
+        let resources = self
             .k8s_client
             .query_resources(
-                namespace,
+                &endpoint.namespace,
                 mapping,
-                status_query,
-                label_selector.as_ref(),
-                annotation_selector.as_ref(),
+                status.as_ref(),
+                Some(&labels),
+                endpoint.annotation_selector.as_ref(),
             )
-            .await
-            .map_err(|e| QueryResponse::Error {
-                error: format!("Failed to query resources: {}", e),
-            })?;
-
-        if mapping.group.is_empty() && mapping.resource == "pods" {
-            resources.retain(|resource| {
-                serde_json::to_value(resource)
-                    .ok()
-                    .and_then(|value| serde_json::from_value(value).ok())
-                    .is_some_and(|pod| K8sClient::pod_ready(&pod))
-            });
+            .await?;
+        let now = time::OffsetDateTime::now_utc();
+        let mut candidates = Vec::new();
+        for resource in resources {
+            let pod: k8s_openapi::api::core::v1::Pod =
+                serde_json::from_value(serde_json::to_value(&resource)?)?;
+            if K8sClient::pod_ready(&pod) {
+                let characters = characters_on_pod(&pod, &self.config, &[], now);
+                candidates.push((resource, pod, characters));
+            }
         }
-
-        if resources.is_empty() {
-            return Err(QueryResponse::Error {
-                error: "No matching resources found".to_string(),
+        let Some(character) = character else {
+            let mut servers = Vec::new();
+            for (_, pod, mut characters) in candidates {
+                characters.retain(|c| ids.is_empty() || ids.contains(&c.character_id));
+                if !characters.is_empty() {
+                    servers.push(CharacterServer {
+                        server: pod.metadata.uid.context("Missing server identity")?,
+                        characters,
+                    });
+                }
+            }
+            servers.sort_by(|a, b| a.server.cmp(&b.server));
+            return Ok(QueryResponse::CharacterList { servers });
+        };
+        candidates.retain(|(_, _, chars)| {
+            chars.iter().any(|c| c.character_id == character)
+                || chars.len() < self.config.max_characters_per_server
+        });
+        candidates.sort_by_key(|(_, pod, chars)| {
+            (
+                std::cmp::Reverse(chars.iter().any(|c| c.character_id == character)),
+                std::cmp::Reverse(
+                    chars
+                        .iter()
+                        .filter(|c| ids.contains(&c.character_id))
+                        .count(),
+                ),
+                chars.len(),
+                pod.metadata.uid.clone(),
+            )
+        });
+        let Some((resource, pod, characters)) = candidates.first() else {
+            return Ok(QueryResponse::Error {
+                error: "No server available".into(),
             });
+        };
+        let name = pod.metadata.name.as_deref().context("Missing Pod name")?;
+        let (ip, ports) = if mapping.ports.is_some() {
+            self.extract_multi_port_target_info(resource, mapping, &endpoint.namespace, name)
+                .await
+                .map_err(|_| anyhow::anyhow!("Invalid backend ports"))?
+        } else {
+            let (ip, port) = self
+                .extract_target_info(resource, mapping, &endpoint.namespace, name)
+                .await
+                .map_err(|_| anyhow::anyhow!("Invalid backend port"))?;
+            (
+                ip,
+                self.config
+                    .get_data_ports()
+                    .into_iter()
+                    .map(|p| (p.name, port))
+                    .collect(),
+            )
+        };
+        let mut routes = HashMap::new();
+        let mut public_ports = HashMap::new();
+        for port in self.config.get_data_ports() {
+            let target = ports.get(&port.name).context("Missing backend port")?;
+            routes.insert((port.port, port.protocol), *target);
+            public_ports.insert(port.name, port.port);
         }
-
-        Ok(resources)
+        anyhow::ensure!(!routes.is_empty(), "No data ports");
+        let key = format!("{}/{}", self.config.character_label_prefix, character);
+        let server = pod
+            .metadata
+            .uid
+            .clone()
+            .context("Missing server identity")?;
+        // A repeated query must not demote an actual connected player.
+        if !characters.iter().any(|c| {
+            c.character_id == character && c.status == crate::characters::CharacterStatus::Used
+        }) {
+            self.k8s_client
+                .allocate_character(&endpoint.namespace, pod, &key)
+                .await?;
+        }
+        self.session_manager
+            .upsert_multi_port(client_addr, ip, routes)
+            .await;
+        Ok(QueryResponse::Success {
+            status: "Allocated".into(),
+            server,
+            ports: public_ports,
+        })
     }
 
     /// Extract target IP and port from resource
@@ -552,47 +463,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_request_serialization() {
-        // Test what the correct format should be
-        let mut label_selector = HashMap::new();
-        label_selector.insert("game.example.com/map".to_string(), "de_dust2".to_string());
-
-        let request = QueryRequest::Query {
-            resource_type: "gameserver".to_string(),
-            namespace: "game-servers".to_string(),
-            status_query: Some(StatusQueryDto {
-                json_path: "status.state".to_string(),
-                expected_values: vec!["Allocated".to_string(), "Ready".to_string()],
-            }),
-            label_selector: Some(label_selector),
-            annotation_selector: None,
-        };
-
-        let json = serde_json::to_string(&request).unwrap();
-        println!("Serialized JSON: {}", json);
-
-        // Now deserialize it back
-        let deserialized: QueryRequest = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            QueryRequest::Query {
-                resource_type,
-                namespace,
-                status_query,
-                label_selector,
-                annotation_selector: _,
-            } => {
-                assert_eq!(resource_type, "gameserver");
-                assert_eq!(namespace, "game-servers");
-                assert!(status_query.is_some());
-                assert!(label_selector.is_some());
-
-                let sq = status_query.unwrap();
-                assert_eq!(sq.expected_values.len(), 2);
-                assert_eq!(sq.expected_values[0], "Allocated");
-                assert_eq!(sq.expected_values[1], "Ready");
-            }
-            _ => panic!("Expected Query variant"),
-        }
+    fn rejects_infrastructure_fields() {
+        assert!(
+            serde_json::from_str::<QueryRequest>(
+                r#"{"type":"query","map":"tutorial","characterId":"me","namespace":"private"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<QueryRequest>(
+                r#"{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend"]}"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -608,7 +491,7 @@ mod tests {
         let (mut reader, mut writer) = tokio::io::duplex(64);
         let ids: Vec<_> = (0..128).map(|i| format!("character-{i:050}")).collect();
         let payload = serde_json::to_vec(&serde_json::json!({
-            "type": "characterList", "namespace": "games", "characterIds": ids
+            "type": "characterList", "map": "tutorial", "characterIds": ids
         }))
         .unwrap();
         assert!(payload.len() > 4096);

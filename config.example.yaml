@@ -1,5 +1,7 @@
 # Regional TCP query and UDP forwarding configuration.
 queryPort: 9000
+mapLabel: map
+maxCharactersPerServer: 128
 dataPort: 7777
 sessionTimeoutSeconds: 300
 characterLabelPrefix: characters.udp-director.io

@@ -81,18 +81,18 @@ spec:
 Query the director's TCP query port:
 
 ```bash
-printf '%s\n' '{"type":"query","resourceType":"game-pod","namespace":"game-servers","labelSelector":{"app":"game-server"}}' | nc <DIRECTOR_IP> 9000
+printf '%s\n' '{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}' | nc <DIRECTOR_IP> 9000
 ```
 
 A successful response identifies the selected server and public director ports:
 
 ```json
-{"status":"ready","server":"game-server","ports":{"game-udp":7777,"game-tcp":7777,"query":27015}}
+{"status":"Allocated","server":"opaque-server-id","ports":{"game-udp":7777,"game-tcp":7777,"query":27015}}
 ```
 
-After `ready`, send normal game, RCON, or query protocol traffic to the
+After `Allocated`, send normal game, RCON, or query protocol traffic to the
 corresponding director port. There is no routing token or setup packet.
-`ready` confirms forwarding setup; actual server connection events determine
+`Allocated` confirms forwarding setup; actual server connection events determine
 player occupancy.
 
 ## How It Works

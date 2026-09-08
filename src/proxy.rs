@@ -631,6 +631,20 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_label_query_then_unmodified_udp_reaches_selected_pod() {
+        access_fixture(128, false).await;
+    }
+
+    #[tokio::test]
+    async fn full_capacity_does_not_install_route() {
+        access_fixture(0, false).await;
+    }
+
+    #[tokio::test]
+    async fn conflicting_assignment_does_not_install_route() {
+        access_fixture(128, true).await;
+    }
+
+    async fn access_fixture(capacity: usize, reject_patch: bool) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let backend = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let backend_port = backend.local_addr().unwrap().port();
@@ -642,24 +656,48 @@ mod tests {
                 "apiVersion":"v1", "kind":"PodList", "metadata":{},
                 "items":[{
                     "apiVersion":"v1", "kind":"Pod",
-                    "metadata":{"name":"selected-server", "namespace":"games", "uid":"pod-1", "labels":{"map":"tutorial"}},
+                    "metadata":{"name":"selected-server", "namespace":"games", "uid":"pod-1", "resourceVersion":"1", "labels":{"map":"tutorial", "characters.udp-director.io/friend-1":"Used"}},
                     "spec":{"containers":[{"name":"game", "ports":[{"name":"game", "containerPort":backend_port}]}]},
                     "status":{"phase":"Running", "podIP":"127.0.0.1", "conditions":[{"type":"Ready", "status":"True"}]}
                 }]
-            }).to_string();
+            });
+            let mut pod_list = pod_list;
+            let mut empty = pod_list["items"][0].clone();
+            empty["metadata"]["name"] = serde_json::json!("empty-server");
+            empty["metadata"]["uid"] = serde_json::json!("pod-0");
+            empty["metadata"]["labels"] = serde_json::json!({"map":"tutorial"});
+            pod_list["items"].as_array_mut().unwrap().insert(0, empty);
+            let pod_list = pod_list.to_string();
             let api_task = tokio::spawn(async move {
                 let (stream, _) = api.accept().await.unwrap();
                 http1::Builder::new().serve_connection(TokioIo::new(stream), service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                    assert_eq!(request.uri().path(), "/api/v1/namespaces/games/pods");
-                    assert!(request.uri().query().unwrap().contains("labelSelector=map%3Dtutorial"));
                     let body = pod_list.clone();
-                    async move { Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(body)))) }
+                    async move {
+                        use http_body_util::BodyExt;
+                        if request.method() == hyper::Method::PATCH {
+                            assert_eq!(request.uri().path(), "/api/v1/namespaces/games/pods/selected-server");
+                            let bytes = request.into_body().collect().await.unwrap().to_bytes();
+                            let patch: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                            assert_eq!(patch["metadata"]["labels"]["characters.udp-director.io/me"], "Allocated");
+                            assert_eq!(patch["metadata"]["resourceVersion"], "1");
+                            if reject_patch {
+                                return Ok(Response::builder().status(409).body(Full::new(Bytes::from(r#"{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","message":"internal-pod-conflict","code":409}"#))).unwrap());
+                            }
+                            let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(list["items"][1].to_string()))))
+                        } else {
+                            assert_eq!(request.uri().path(), "/api/v1/namespaces/games/pods");
+                            assert!(request.uri().query().unwrap().contains("labelSelector=map%3Dtutorial"));
+                            Ok(Response::new(Full::new(Bytes::from(body))))
+                        }
+                    }
                 })).await.unwrap();
             });
             let client = kube::Client::try_from(kube::Config::new(format!("http://{api_addr}").parse().unwrap())).unwrap();
             let k8s = K8sClient::from_client(client);
             let config: Config = serde_yaml::from_str(&format!(r#"
 queryPort: 9000
+maxCharactersPerServer: {capacity}
 dataPort: {}
 sessionTimeoutSeconds: 300
 defaultEndpoint:
@@ -678,16 +716,34 @@ resourceQueryMapping:
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let query_addr = listener.local_addr().unwrap();
             let query_task = tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                query.handle_connection(stream).await.unwrap();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    query.handle_connection(stream).await.unwrap();
+                }
             });
+            let mut lookup = TcpStream::connect(query_addr).await.unwrap();
+            lookup.write_all(br#"{"type":"characterList","map":"tutorial","characterIds":["friend-1"]}"#).await.unwrap();
+            let mut found = Vec::new();
+            lookup.read_to_end(&mut found).await.unwrap();
+            let found: serde_json::Value = serde_json::from_slice(&found).unwrap();
+            assert_eq!(found["servers"].as_array().unwrap().len(), 1);
+            assert_eq!(found["servers"][0]["server"], "pod-1");
+            assert_eq!(found["servers"][0]["characters"][0]["characterId"], "friend-1");
+            assert!(found["servers"][0].get("namespace").is_none());
             let mut tcp = TcpStream::connect(query_addr).await.unwrap();
-            tcp.write_all(br#"{"type":"query","resourceType":"pod","namespace":"games","labelSelector":{"map":"tutorial"}}"#).await.unwrap();
+            tcp.write_all(br#"{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}"#).await.unwrap();
             let mut reply = Vec::new();
             tcp.read_to_end(&mut reply).await.unwrap();
             let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
-            assert_eq!(reply["status"], "ready");
-            assert_eq!(reply["server"], "selected-server");
+            if capacity == 0 || reject_patch {
+                assert_eq!(reply["error"], if capacity == 0 { "No server available" } else { "Unable to establish route" });
+                assert!(sessions.get(&tcp.local_addr().unwrap().ip()).is_none());
+                query_task.await.unwrap();
+                api_task.abort();
+                return;
+            }
+            assert_eq!(reply["status"], "Allocated");
+            assert_eq!(reply["server"], "pod-1");
             assert_eq!(reply["ports"]["default"], data_addr.port());
             assert!(reply.get("token").is_none());
             query_task.await.unwrap();

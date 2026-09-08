@@ -11,7 +11,7 @@ rules:
   # Access to Pods (required for direct pod routing)
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   
   # Access to Services
   - apiGroups: [""]

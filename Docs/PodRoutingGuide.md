@@ -267,13 +267,13 @@ statusQuery:
 Query the regional director over TCP:
 
 ```bash
-printf '%s\n' '{"type":"query","resourceType":"game-pod","namespace":"game-servers","labelSelector":{"app":"game-server"}}' | nc <UDP-DIRECTOR-IP> 9000
+printf '%s\n' '{"type":"query","map":"tutorial","characterId":"me","friendIds":["friend-1"]}' | nc <UDP-DIRECTOR-IP> 9000
 ```
 
 A successful response identifies the server and public director port:
 
 ```json
-{"status":"ready","server":"game-server-0","ports":{"default":7777}}
+{"status":"Allocated","server":"opaque-server-id","ports":{"default":7777}}
 ```
 
 Send application datagrams directly to that director's UDP port. See

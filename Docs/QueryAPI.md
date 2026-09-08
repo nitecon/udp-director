@@ -1,97 +1,89 @@
 # TCP Query and Connection API
 
-Published contract for v2.0.0. This release restores query and forwarding and
-adds read-only character lookup. Initial character-assignment integration and
-shared-NAT connection identity remain unresolved; the limitations below apply.
+Version 3.0.0 replaces the infrastructure-facing v2 request contract. Clients
+send map and character IDs; all Kubernetes details stay inside the director.
 
-## Transport
+## Connect to a server
 
-Connect to the regional director's TCP query port (default 9000). Send one UTF-8
-JSON document, optionally followed by a newline. Request fields use camelCase.
-The director reads across TCP fragments, returns one JSON response, and closes
-the connection. Requests may be up to 65536 bytes.
-
-## Server query
+Connect to the regional director's TCP query port (default 9000), send one UTF-8
+JSON document, and read the response until the connection closes:
 
 ```json
-{"type":"query","resourceType":"pod","namespace":"game-servers","labelSelector":{"map":"tutorial"}}
+{"type":"query","map":"tutorial","characterId":"my-character","friendIds":["friend-1","friend-2"]}
 ```
 
-`resourceType` names a configured resource mapping. `namespace` is required.
-Optional `labelSelector` and `annotationSelector` are exact-match string maps.
-Optional `statusQuery` contains `jsonPath` and `expectedValues` (an array).
-Core Pod queries additionally require a Running, Ready, nonterminating Pod with
-a Pod IP. No match returns an error and installs no new route.
+`map` and the joining `characterId` are required. `friendIds` is optional and
+may be empty. Selection first preserves an existing visible assignment for the
+joining character, otherwise prefers the available server containing the most
+requested friends, then the fewest assigned characters. If no friend is present
+or their server is full, another available server on the map is selected.
 
 ```json
-{"status":"ready","server":"tutorial-0","ports":{"default":7777}}
+{"status":"Allocated","server":"opaque-server-id","ports":{"default":7777}}
 ```
 
-`ready` means the forwarding route was installed, not that the player connected.
-`ports` contains director data ports, not private backend ports. Send gameplay
-directly to the same regional director after this response. No token or UDP setup
-exchange is used. A subsequent successful query changes the forwarding target.
+On success, send normal gameplay datagrams to the **same regional director** at
+the returned data port. `server` is an opaque identity for grouping lookup
+results; it is not an address or credential. No ticket, redemption, UDP setup,
+or additional backend API request is needed.
 
-## Character-list lookup
+`Allocated` means the character assignment and forwarding route are ready.
+It does not mean the player has connected. An already `Used` character remains
+`Used` when repeating a query. Actual server events drive occupancy.
+
+## Find friends
 
 ```json
-{"type":"characterList","namespace":"game-servers","characterIds":["friend-1","friend-2"],"labelSelector":{"map":"tutorial"}}
+{"type":"characterList","map":"tutorial","characterIds":["friend-1","friend-2"]}
 ```
-
-This read-only lookup returns Ready Pods containing any requested character.
-An empty `characterIds` array lists all visible characters in matching Pods.
-`labelSelector` is optional. Lookup does not install or change a route.
 
 ```json
-{"servers":[{"namespace":"game-servers","name":"tutorial-0","characters":[{"characterId":"friend-1","status":"Used"}]}]}
+{"servers":[{"server":"opaque-server-id","characters":[{"characterId":"friend-1","status":"Used"}]}]}
 ```
 
-Results are sorted by Pod name and character ID. No matches returns
-`{"servers":[]}`. To query a friend's current server using existing label
-selection, include its returned character label and status in `labelSelector`.
+This lookup does not allocate or change a route. It returns matching characters
+grouped by server; missing or empty `characterIds` lists all visible characters
+on the map. No matches returns `{"servers":[]}`. To join the group, send a
+`query` with those friends' character IDs. Availability may change between lookup
+and connection. Server IDs and character IDs are sorted in lookup responses.
 
-## Pod character metadata
+## Transport and errors
 
-Configure `characterLabelPrefix` (default `characters.udp-director.io`). Each
-character uses one label, for example:
+Use camelCase fields and one JSON document per TCP connection. A trailing
+newline is optional. Fragmented requests are supported up to 65536 bytes.
+Map and character IDs accept 1–63 ASCII characters: start/end alphanumeric,
+with alphanumerics, `-`, `_`, and `.` inside. Unknown fields are rejected.
 
-```yaml
-metadata:
-  labels:
-    characters.udp-director.io/character-1: Allocated
-    characters.udp-director.io/character-2: Used
-    characters.udp-director.io/character-3: Disconnected
-  annotations:
-    udp-director.io/disconnected-at: '{"character-3":"2026-09-07T12:00:00Z"}'
-```
+Errors have the form `{"error":"message"}`. No capacity returns
+`{"error":"No server available"}`. A failed assignment does not install a new
+route or report success. Kubernetes error details stay in director logs.
 
-Character IDs must fit a Kubernetes label name: 1–63 ASCII characters, start and
-end with an alphanumeric character, and otherwise contain alphanumerics, `-`,
-`_`, or `.`. The disconnect annotation key is configurable with
-`disconnectAnnotation` (default `udp-director.io/disconnected-at`). Its value is
-a JSON object mapping character IDs to RFC3339 timestamps.
+## Operator configuration — not client inputs
 
-- `Allocated`: query/initial connection requested; not counted as a connected player.
-- `Used`: the game server reported that the player actually connected.
-- `Disconnected`: record disconnect time and retain the label for reconnect for
-  up to 120 seconds. At 120 seconds it is no longer visible to lookup; the
-  controller removes the expired label and timestamp.
+The director uses `defaultEndpoint` for namespace, base selectors, and resource
+mapping. Access requires a core Pod mapping. `mapLabel` defaults to `map` and
+maps the client's map value to the internal label. `maxCharactersPerServer`
+defaults to 128. Available capacity counts visible `Allocated`, `Used`, and
+unexpired `Disconnected` characters. Only Ready, Running, nonterminating Pods
+with an IP are eligible. Backend ports come from the configured resource mapping;
+response ports are public director ports.
 
-A missing or invalid disconnect timestamp makes that disconnected character
-ineligible for lookup. A new actual connection restores `Used` and clears its
-disconnect timestamp. Query activity and proxy timeouts do not update occupancy.
-This director currently reads this metadata; controller mutation is separate.
+Each assignment uses one label under `characterLabelPrefix` (default
+`characters.udp-director.io`): `<prefix>/<characterId>: Allocated`. The director
+patches this label using the Pod resource version before installing forwarding;
+a concurrent update fails the request instead of overwriting the newer state.
+The service account requires Pod get/list/watch/patch permissions.
 
-## Current connection identity
+The occupancy controller changes the label to `Used` on actual connection and
+`Disconnected` on disconnect. It stores the RFC3339 disconnect time in the JSON
+ID-to-timestamp annotation `udp-director.io/disconnected-at` (configurable via
+`disconnectAnnotation`). Disconnected entries stay visible for less than 120
+seconds; the controller removes expired labels and timestamps. A new connection
+restores `Used` and clears the timestamp. Proxy inactivity never changes occupancy.
 
-The restored original query route is keyed by the TCP peer IP. Its UDP source
-port may differ. Upstream UDP sockets are isolated by client source port, but
-two players behind one public IP cannot select different targets with this
-IP-keyed query contract. This limitation requires an explicit connection identity
-decision; it must not be hidden behind a replacement ticket mechanism.
+## Current network limitation
 
-## Errors and removed requests
-
-Errors use `{"error":"message"}`. `allocation` and `sessionReset` request types
-are rejected. There is no routing-token cache, consume callback, reservation
-admin API, or special UDP control datagram. All UDP payload bytes are gameplay.
+The restored route associates TCP and UDP by the client's source IP. They must
+reach the director with the same source IP. Different UDP source ports preserve
+separate reply sockets, but clients behind one public IP cannot independently
+select different servers. This release does not change that network limitation.
