@@ -584,9 +584,10 @@ impl DataProxy {
         let target_addr = session_ref.get_target_addr(proxy_port, Protocol::Udp)?;
 
         // Get or create dedicated socket for this session/port
-        let session_socket = session_ref
-            .get_or_create_udp_socket(proxy_port, client_addr, proxy_socket.clone())
-            .await?;
+        let session_socket =
+            session_ref.get_or_create_udp_socket(proxy_port, client_addr, proxy_socket.clone())?;
+        // Never suspend while holding a synchronous DashMap shard lock.
+        drop(session_ref);
 
         debug!(
             "Proxying packet via dedicated socket: {} -> {} ({} bytes)",
@@ -749,6 +750,23 @@ resourceQueryMapping:
             query_task.await.unwrap();
 
             let proxy = DataProxy::new(sessions.clone(), config, k8s, DefaultEndpointCacheHandle::new());
+            // Poll the first upstream send before driving socket readiness. Session
+            // inspection must remain available while that send is suspended.
+            let probe_client: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+            let mut forwarding = Box::pin(proxy.proxy_packet_bidirectional(
+                gameplay.clone(), probe_client, b"probe".to_vec(), data_addr.port(),
+            ));
+            assert!(futures::poll!(forwarding.as_mut()).is_pending());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let inspected_sessions = sessions.clone();
+            let inspector = std::thread::spawn(move || {
+                sender.send(inspected_sessions.count()).unwrap();
+            });
+            let inspection = receiver.recv_timeout(std::time::Duration::from_secs(1));
+            // Release the suspended future even on failure so the test cannot hang.
+            drop(forwarding);
+            inspector.join().unwrap();
+            assert_eq!(inspection.expect("pending UDP send must release session map lock"), 1);
             let proxy_task = tokio::spawn(async move { proxy.run_udp_socket(gameplay, data_addr.port()).await.unwrap() });
             let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let payload = b"\xff\xff\xff\xffRESETordinary-game-bytes";

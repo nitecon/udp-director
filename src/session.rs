@@ -1,10 +1,12 @@
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
-use tokio::sync::RwLock;
 use tokio::time::interval;
 use tracing::{debug, error, info};
 
@@ -22,16 +24,18 @@ pub struct SessionSocket {
     /// The dedicated UDP socket for this session
     socket: Arc<UdpSocket>,
     /// Shutdown signal to stop the receive task
-    shutdown: Arc<RwLock<bool>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl SessionSocket {
     /// Create a new session socket bound to an ephemeral port
-    pub async fn new() -> Result<Self, std::io::Error> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    pub fn new() -> Result<Self, std::io::Error> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(socket)?;
         Ok(Self {
             socket: Arc::new(socket),
-            shutdown: Arc::new(RwLock::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -46,9 +50,8 @@ impl SessionSocket {
     }
 
     /// Signal shutdown to the receive task
-    pub async fn shutdown(&self) {
-        let mut shutdown = self.shutdown.write().await;
-        *shutdown = true;
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 
     /// Start a background task to receive packets from the target and forward
@@ -66,7 +69,7 @@ impl SessionSocket {
             let mut buffer = vec![0u8; 65535];
             loop {
                 // Check for shutdown signal
-                if *shutdown.read().await {
+                if shutdown.load(Ordering::Relaxed) {
                     debug!(
                         "Receive task shutting down for client {} on port {}",
                         client_addr, proxy_port
@@ -148,7 +151,7 @@ impl Session {
     }
 
     /// Get or create a dedicated UDP socket for a specific proxy port
-    pub async fn get_or_create_udp_socket(
+    pub fn get_or_create_udp_socket(
         &mut self,
         proxy_port: u16,
         client_addr: SocketAddr,
@@ -161,7 +164,7 @@ impl Session {
         }
 
         // Create new socket
-        let session_socket = SessionSocket::new().await?;
+        let session_socket = SessionSocket::new()?;
         let local_addr = session_socket.local_addr()?;
         debug!(
             "Created dedicated socket {} for client {} on proxy port {}",
@@ -178,13 +181,13 @@ impl Session {
     }
 
     /// Shutdown all UDP sockets for this session
-    pub async fn shutdown_sockets(&mut self) {
+    pub fn shutdown_sockets(&mut self) {
         for ((proxy_port, client_port), socket) in &self.udp_sockets {
             debug!(
                 "Shutting down socket for proxy port {} and client port {}",
                 proxy_port, client_port
             );
-            socket.shutdown().await;
+            socket.shutdown();
         }
         self.udp_sockets.clear();
     }
@@ -307,7 +310,7 @@ impl SessionManager {
 
         // If session exists, shut down old sockets
         if let Some(mut old_session) = self.sessions.get_mut(&key) {
-            old_session.shutdown_sockets().await;
+            old_session.shutdown_sockets();
         }
 
         let session = Session::new(target_addr);
@@ -327,7 +330,7 @@ impl SessionManager {
 
         // If session exists, shut down old sockets
         if let Some(mut old_session) = self.sessions.get_mut(&key) {
-            old_session.shutdown_sockets().await;
+            old_session.shutdown_sockets();
         }
 
         let session = Session::new_multi_port(target_ip.clone(), port_mappings.clone());
@@ -371,7 +374,7 @@ impl SessionManager {
 
         // Shutdown all sockets before clearing
         for mut entry in self.sessions.iter_mut() {
-            entry.shutdown_sockets().await;
+            entry.shutdown_sockets();
         }
 
         self.sessions.clear();
@@ -407,7 +410,7 @@ impl SessionManager {
                         callback(&session.target_ip);
                     }
 
-                    session.shutdown_sockets().await;
+                    session.shutdown_sockets();
                     removed_count += 1;
                 }
             }
@@ -552,15 +555,12 @@ mod tests {
 
         let old_socket = session
             .get_or_create_udp_socket(7777, old_client_addr, proxy_socket.clone())
-            .await
             .unwrap();
         let new_socket = session
             .get_or_create_udp_socket(7777, new_client_addr, proxy_socket.clone())
-            .await
             .unwrap();
         let reused_new_socket = session
             .get_or_create_udp_socket(7777, new_client_addr, proxy_socket)
-            .await
             .unwrap();
 
         assert_ne!(
@@ -573,6 +573,6 @@ mod tests {
         );
         assert_eq!(session.udp_sockets.len(), 2);
 
-        session.shutdown_sockets().await;
+        session.shutdown_sockets();
     }
 }
