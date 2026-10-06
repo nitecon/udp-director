@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
+use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{
     Client,
-    api::{Api, DynamicObject, ListParams},
+    api::{Api, DynamicObject, ListParams, WatchEvent, WatchParams},
     discovery::ApiResource,
 };
 use serde_json::Value;
@@ -10,6 +11,16 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::config::{PortMapping, ResourceMapping};
+
+pub const DRAIN_LABEL: &str = "udp-director.io/draining";
+
+pub fn pod_draining(pod: &Pod) -> bool {
+    pod.metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(DRAIN_LABEL))
+        .is_some_and(|value| value == "true")
+}
 
 /// Kubernetes client wrapper
 #[derive(Clone)]
@@ -34,6 +45,7 @@ impl K8sClient {
     }
 
     pub async fn allocate_character(&self, namespace: &str, pod: &Pod, key: &str) -> Result<()> {
+        anyhow::ensure!(!pod_draining(pod), "Pod is draining");
         let name = pod.metadata.name.as_deref().context("Pod has no name")?;
         let version = pod
             .metadata
@@ -73,6 +85,27 @@ impl K8sClient {
         label_selector: Option<&HashMap<String, String>>,
         annotation_selector: Option<&HashMap<String, String>>,
     ) -> Result<Vec<DynamicObject>> {
+        Ok(self
+            .query_resources_snapshot(
+                namespace,
+                mapping,
+                status_query,
+                label_selector,
+                annotation_selector,
+            )
+            .await?
+            .0)
+    }
+
+    /// Retain the list version so cold-start watches cannot miss a readiness change.
+    pub async fn query_resources_snapshot(
+        &self,
+        namespace: &str,
+        mapping: &ResourceMapping,
+        status_query: Option<&StatusQuery>,
+        label_selector: Option<&HashMap<String, String>>,
+        annotation_selector: Option<&HashMap<String, String>>,
+    ) -> Result<(Vec<DynamicObject>, String)> {
         // Create API resource definition
         let api_resource = ApiResource {
             group: mapping.group.clone(),
@@ -108,6 +141,11 @@ impl K8sClient {
             .list(&list_params)
             .await
             .with_context(|| format!("Failed to list resources: {}", mapping.resource))?;
+        let version = resource_list
+            .metadata
+            .resource_version
+            .clone()
+            .unwrap_or_default();
 
         debug!(
             "Found {} resources of type {}",
@@ -132,7 +170,42 @@ impl K8sClient {
         }
 
         debug!("After filtering: {} resources match", filtered.len());
-        Ok(filtered)
+        Ok((filtered, version))
+    }
+
+    /// Wait for a native Pod change, then let selection re-read current state.
+    pub async fn wait_for_pod_change(
+        &self,
+        namespace: &str,
+        labels: &HashMap<String, String>,
+        version: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(!version.is_empty(), "Pod list has no resource version");
+        let selector = labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let api = Api::<Pod>::namespaced(self.client.clone(), namespace);
+        let stream = match api
+            .watch(&WatchParams::default().labels(&selector), version)
+            .await
+        {
+            Ok(stream) => stream,
+            Err(kube::Error::Api(error)) if error.code == 410 => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.try_next().await? {
+            match event {
+                WatchEvent::Bookmark(_) => continue,
+                WatchEvent::Error(error) if error.code != 410 => {
+                    anyhow::bail!("Pod watch failed: {error:?}")
+                }
+                _ => return Ok(()),
+            }
+        }
+        Ok(())
     }
 
     /// Check if a resource matches the status query

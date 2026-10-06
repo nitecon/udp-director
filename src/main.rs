@@ -5,6 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod characters;
 mod config;
+mod demand;
 mod k8s_client;
 mod load_balancer;
 mod metrics;
@@ -13,6 +14,9 @@ mod proxy;
 mod query_server;
 mod resource_monitor;
 mod session;
+
+#[cfg(test)]
+mod capacity_tests;
 
 use config::Config;
 use k8s_client::K8sClient;

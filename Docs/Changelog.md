@@ -7,6 +7,18 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-10-06
+
+Add optional aggregate capacity-demand signaling when a TCP access query finds
+no eligible server. Concurrent queries share a controller POST and wait on
+native Pod watches within a configurable startup timeout. Cold waits cancel
+when the client disconnects. Ready servers continue through normal character
+selection, resource-version-guarded label assignment, and UDP forwarding.
+
+Pods labeled `udp-director.io/draining: "true"` are excluded from access selection.
+Controller response codes, drain races, and always-on prerequisites are documented
+in [Query API](QueryAPI.md). Occupancy remains driven by actual server events.
+
 ## [3.0.0] - 2026-09-07
 
 Replace client Kubernetes resource queries with map, character ID, and optional

@@ -121,7 +121,11 @@ impl DataProxy {
     }
 
     /// Run a UDP socket listener
-    async fn run_udp_socket(&self, socket: Arc<UdpSocket>, proxy_port: u16) -> Result<()> {
+    pub(crate) async fn run_udp_socket(
+        &self,
+        socket: Arc<UdpSocket>,
+        proxy_port: u16,
+    ) -> Result<()> {
         let mut buffer = vec![0u8; 65535]; // Max UDP packet size
 
         loop {

@@ -7,6 +7,14 @@ sessionTimeoutSeconds: 300
 characterLabelPrefix: characters.udp-director.io
 disconnectAnnotation: udp-director.io/disconnected-at
 
+# Optional: signal aggregate demand when a map has no eligible server capacity.
+# The director waits for Ready Pods; the controller owns starting capacity.
+# capacityDemand:
+#   endpoint: http://capacity-controller.control.svc:8080/v1alpha1/demand
+#   bootTimeoutSeconds: 300
+#   backendGroups:
+#     tutorial: example-backend
+
 defaultEndpoint:
   resourceType: pod
   namespace: game-servers

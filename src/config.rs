@@ -51,6 +51,10 @@ pub struct Config {
     #[serde(default = "default_disconnect_annotation")]
     pub disconnect_annotation: String,
 
+    /// Optional aggregate capacity signal for maps without eligible Pods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_demand: Option<CapacityDemandConfig>,
+
     /// Port for the Phase 2 TCP/UDP Data Proxy (deprecated, use data_ports)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_port: Option<u16>,
@@ -85,6 +89,20 @@ fn default_character_label_prefix() -> String {
 }
 fn default_disconnect_annotation() -> String {
     "udp-director.io/disconnected-at".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CapacityDemandConfig {
+    pub endpoint: String,
+    /// Client map ID -> controller-owned aggregate backend group.
+    pub backend_groups: HashMap<String, String>,
+    #[serde(default = "default_boot_timeout")]
+    pub boot_timeout_seconds: u64,
+}
+
+fn default_boot_timeout() -> u64 {
+    300
 }
 
 /// Default endpoint query configuration
@@ -225,6 +243,39 @@ impl Config {
 
     /// Validate the configuration
     fn validate(&self) -> Result<()> {
+        if let Some(demand) = &self.capacity_demand {
+            let uri: hyper::Uri = demand
+                .endpoint
+                .parse()
+                .context("Invalid capacityDemand endpoint")?;
+            anyhow::ensure!(
+                uri.scheme_str() == Some("http") && uri.authority().is_some(),
+                "capacityDemand endpoint must be an absolute internal HTTP URL"
+            );
+            anyhow::ensure!(
+                demand.boot_timeout_seconds > 0,
+                "bootTimeoutSeconds must be non-zero"
+            );
+            anyhow::ensure!(
+                !demand.backend_groups.is_empty(),
+                "backendGroups must not be empty"
+            );
+            for (map, group) in &demand.backend_groups {
+                anyhow::ensure!(
+                    crate::characters::valid_character_id(map)
+                        && crate::characters::valid_character_id(group),
+                    "Invalid capacityDemand map or backend group"
+                );
+            }
+            let mapping = self
+                .resource_query_mapping
+                .get(&self.default_endpoint.resource_type)
+                .context("capacityDemand requires a Pod mapping")?;
+            anyhow::ensure!(
+                mapping.group.is_empty() && mapping.resource == "pods",
+                "capacityDemand requires a core Pod mapping"
+            );
+        }
         if self.query_port == 0 {
             anyhow::bail!("query_port must be non-zero");
         }
@@ -278,6 +329,7 @@ mod tests {
         label_selector.insert("agones.dev/fleet".to_string(), "tutorial".to_string());
 
         let config = Config {
+            capacity_demand: None,
             query_port: 9000,
             map_label: "map".into(),
             max_characters_per_server: 128,
@@ -311,6 +363,7 @@ mod tests {
         label_selector.insert("agones.dev/fleet".to_string(), "tutorial".to_string());
 
         let config = Config {
+            capacity_demand: None,
             query_port: 9000,
             map_label: "map".into(),
             max_characters_per_server: 128,

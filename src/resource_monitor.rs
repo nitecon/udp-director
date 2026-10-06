@@ -219,6 +219,7 @@ mod tests {
         }
 
         let config = crate::config::Config {
+            capacity_demand: None,
             query_port: 9000,
             map_label: "map".into(),
             max_characters_per_server: 128,

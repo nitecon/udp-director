@@ -66,7 +66,9 @@ maps the client's map value to the internal label. `maxCharactersPerServer`
 defaults to 128. Available capacity counts visible `Allocated`, `Used`, and
 unexpired `Disconnected` characters. Only Ready, Running, nonterminating Pods
 with an IP are eligible. Backend ports come from the configured resource mapping;
-response ports are public director ports.
+response ports are public director ports. Pods labeled
+`udp-director.io/draining: "true"` are excluded from access selection, including
+repeated access queries. Character lookup can still show their occupants.
 
 Each assignment uses one label under `characterLabelPrefix` (default
 `characters.udp-director.io`): `<prefix>/<characterId>: Allocated`. The director
@@ -80,6 +82,101 @@ ID-to-timestamp annotation `udp-director.io/disconnected-at` (configurable via
 `disconnectAnnotation`). Disconnected entries stay visible for less than 120
 seconds; the controller removes expired labels and timestamps. A new connection
 restores `Used` and clears the timestamp. Proxy inactivity never changes occupancy.
+
+## Capacity demand and cold starts
+
+Available in director version 3.1.0 and later.
+
+By default, an access query with no eligible server returns `No server available`.
+Operators can enable aggregate demand signaling:
+
+```yaml
+capacityDemand:
+  endpoint: http://capacity-controller.control.svc:8080/v1alpha1/demand
+  bootTimeoutSeconds: 300
+  backendGroups:
+    tutorial: example-backend
+```
+
+`backendGroups` maps client map IDs to controller-owned capacity groups. These
+values and the internal HTTP endpoint are director configuration, never client
+fields. A configured entry identifies a published cold map even when it has no
+Pods. An unmapped map can still use existing eligible Pods; if it has no capacity,
+it returns `Unknown backend group` without signaling. Map/group IDs use the same
+1–63 character format as map IDs. The timeout must be positive and defaults to
+300 seconds. Capacity demand requires a core Pod mapping.
+
+Only a valid access `query` with no eligible capacity triggers the callback;
+`characterList`, ready access, and UDP traffic do not trigger it. The director
+sends one HTTP POST with `Content-Type: application/json`:
+
+```json
+{"backendGroup":"example-backend"}
+```
+
+The configured endpoint includes its path. No player identity, assignment,
+credential, desired replica count, or callback response body is part of this
+contract. The controller independently reconciles capacity through Kubernetes.
+Its status code determines the next step:
+
+| HTTP status | Director behavior |
+| --- | --- |
+| 202 | Demand accepted; wait for eligible Pods. This is not a startup acknowledgement. |
+| 404 | Return `Unknown backend group`. |
+| 503 | Return `Backend group is under maintenance`. |
+| Other status or transport failure | Return `Capacity demand unavailable`. |
+
+Concurrent cold queries for the same group share one POST and the startup
+deadline **within one director process**. Each query keeps its normal independent
+character selection and label assignment. Separate director replicas can each
+send a POST; the controller must treat repeated aggregate signals idempotently.
+There are no callback retries or durable request records. Once all waiting
+queries finish or disconnect, a later query may signal the group again.
+
+After 202, the director follows a native Pod watch from the resource version of
+its previous list. On changes it re-reads matching Pods, applies configured
+selectors and readiness/capacity rules, then performs normal friend-aware
+selection and the resource-version-guarded `Allocated` label write. Watch expiry
+or a Kubernetes 410 causes a fresh list/watch; other API errors fail the query.
+No route is installed before successful selection and assignment. A 409
+assignment conflict fails safely as `Unable to establish route`; it is not
+retried. Startup timing includes the POST and subsequent watch/list work. Expiry
+returns `Server startup timed out` without an assignment from the wait.
+
+Clients must keep the TCP connection, including its write side, open while a
+cold query waits. EOF or a read error cancels that query's cold wait. Cancelling
+one query does not cancel other waiters. Cancelling the last waiter releases
+local demand work; a POST already delivered to the controller cannot be recalled.
+Assignment processing that has already begun completes normally. Client read
+timeouts should allow the configured startup timeout plus response processing.
+
+Director, controller, Kubernetes API, regional network endpoint, DNS, and the
+worker capacity reconciler must remain reachable when backend workers are zero.
+Place their required services on the always-on control capacity. Pod/node startup,
+image pulls, published groups, warm capacity, and idle periods are controller or
+cluster configuration. Enabling the director callback alone does not provide a
+controller or configure a node pool.
+
+## Draining and idle shutdown
+
+The generic Pod label `udp-director.io/draining: "true"` excludes the Pod from
+access assignment, including reconnect queries. It does not stop existing UDP
+forwarding or hide its occupants from `characterList`. Removing the marker makes
+the Pod eligible again if it meets the other readiness/capacity rules.
+
+The controller must mark a candidate draining using its current resource version,
+then re-read the Pod's character labels and authoritative occupancy before
+removing capacity. The director's assignment patch includes its listed resource
+version: an intervening drain update makes that patch fail. Conversely, an
+intervening assignment must make the controller's stale drain patch fail, so it
+can re-evaluate the Pod. The controller must preserve pending `Allocated`, actual
+`Used`, and retained `Disconnected` assignments, and guard its final deletion
+against intervening changes. Do not delete based on an earlier empty snapshot.
+
+Actual player connect/disconnect events remain the occupancy authority. Neither
+this callback nor TCP queries, proxy sessions, packet counts, or proxy inactivity
+prove a server is empty. The director does not emit an idle/empty signal; the
+controller owns verified-empty policy and disconnect-retention cleanup.
 
 ## Current network limitation
 

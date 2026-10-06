@@ -7,7 +7,8 @@ use tracing::{debug, error, info};
 
 use crate::characters::{CharacterServer, characters_on_pod, valid_character_id};
 use crate::config::Config;
-use crate::k8s_client::{K8sClient, StatusQuery};
+use crate::demand::{CapacityDemand, DemandError};
+use crate::k8s_client::{K8sClient, StatusQuery, pod_draining};
 use crate::session::SessionManager;
 
 /// Query request from client
@@ -56,6 +57,7 @@ pub struct QueryServer {
     k8s_client: K8sClient,
     session_manager: SessionManager,
     config: Config,
+    demand: CapacityDemand,
 }
 
 impl QueryServer {
@@ -71,6 +73,7 @@ impl QueryServer {
             k8s_client,
             session_manager,
             config,
+            demand: CapacityDemand::default(),
         }
     }
 
@@ -120,7 +123,9 @@ impl QueryServer {
         debug!("Received query: {:?}", request);
 
         // Process the query and establish session
-        let response = self.process_query(request, client_addr).await;
+        let Some(response) = self.process_query(request, client_addr, &mut stream).await else {
+            return Ok(());
+        };
         let response_json = serde_json::to_string(&response)?;
 
         // Send response
@@ -135,15 +140,27 @@ impl QueryServer {
         &self,
         request: QueryRequest,
         client_addr: std::net::SocketAddr,
-    ) -> QueryResponse {
-        let result = self.process_access(request, client_addr).await;
+        stream: &mut TcpStream,
+    ) -> Option<QueryResponse> {
+        let result = self.process_access(request, client_addr, stream).await;
         match result {
-            Ok(response) => response,
+            Ok(response) => Some(response),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<DemandError>(),
+                    Some(DemandError::Cancelled)
+                ) =>
+            {
+                None
+            }
             Err(error) => {
                 error!("Access query failed: {error:#}");
-                QueryResponse::Error {
-                    error: "Unable to establish route".into(),
-                }
+                Some(QueryResponse::Error {
+                    error: error
+                        .downcast_ref::<DemandError>()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "Unable to establish route".into()),
+                })
             }
         }
     }
@@ -152,6 +169,7 @@ impl QueryServer {
         &self,
         request: QueryRequest,
         client_addr: std::net::SocketAddr,
+        stream: &mut TcpStream,
     ) -> Result<QueryResponse> {
         let (map, ids, character) = match request {
             QueryRequest::CharacterList { map, character_ids } => (map, character_ids, None),
@@ -180,14 +198,14 @@ impl QueryServer {
             "Access requires a Pod mapping"
         );
         let mut labels = endpoint.label_selector.clone().unwrap_or_default();
-        labels.insert(self.config.map_label.clone(), map);
+        labels.insert(self.config.map_label.clone(), map.clone());
         let status = endpoint.status_query.as_ref().map(|s| StatusQuery {
             json_path: s.json_path.clone(),
             expected_values: s.expected_values.clone(),
         });
-        let resources = self
+        let (mut resources, mut version) = self
             .k8s_client
-            .query_resources(
+            .query_resources_snapshot(
                 &endpoint.namespace,
                 mapping,
                 status.as_ref(),
@@ -195,52 +213,86 @@ impl QueryServer {
                 endpoint.annotation_selector.as_ref(),
             )
             .await?;
-        let now = time::OffsetDateTime::now_utc();
-        let mut candidates = Vec::new();
-        for resource in resources {
-            let pod: k8s_openapi::api::core::v1::Pod =
-                serde_json::from_value(serde_json::to_value(&resource)?)?;
-            if K8sClient::pod_ready(&pod) {
-                let characters = characters_on_pod(&pod, &self.config, &[], now);
-                candidates.push((resource, pod, characters));
-            }
-        }
-        let Some(character) = character else {
-            let mut servers = Vec::new();
-            for (_, pod, mut characters) in candidates {
-                characters.retain(|c| ids.is_empty() || ids.contains(&c.character_id));
-                if !characters.is_empty() {
-                    servers.push(CharacterServer {
-                        server: pod.metadata.uid.context("Missing server identity")?,
-                        characters,
-                    });
+        let mut flight = None;
+        let candidates = loop {
+            let now = time::OffsetDateTime::now_utc();
+            let mut candidates = Vec::new();
+            for resource in resources.drain(..) {
+                let pod: k8s_openapi::api::core::v1::Pod =
+                    serde_json::from_value(serde_json::to_value(&resource)?)?;
+                if K8sClient::pod_ready(&pod) {
+                    let characters = characters_on_pod(&pod, &self.config, &[], now);
+                    candidates.push((resource, pod, characters));
                 }
             }
-            servers.sort_by(|a, b| a.server.cmp(&b.server));
-            return Ok(QueryResponse::CharacterList { servers });
-        };
-        candidates.retain(|(_, _, chars)| {
-            chars.iter().any(|c| c.character_id == character)
-                || chars.len() < self.config.max_characters_per_server
-        });
-        candidates.sort_by_key(|(_, pod, chars)| {
-            (
-                std::cmp::Reverse(chars.iter().any(|c| c.character_id == character)),
-                std::cmp::Reverse(
-                    chars
-                        .iter()
-                        .filter(|c| ids.contains(&c.character_id))
-                        .count(),
-                ),
-                chars.len(),
-                pod.metadata.uid.clone(),
-            )
-        });
-        let Some((resource, pod, characters)) = candidates.first() else {
-            return Ok(QueryResponse::Error {
-                error: "No server available".into(),
+            let Some(character) = character.as_deref() else {
+                let mut servers = Vec::new();
+                for (_, pod, mut characters) in candidates {
+                    characters.retain(|c| ids.is_empty() || ids.contains(&c.character_id));
+                    if !characters.is_empty() {
+                        servers.push(CharacterServer {
+                            server: pod.metadata.uid.context("Missing server identity")?,
+                            characters,
+                        });
+                    }
+                }
+                servers.sort_by(|a, b| a.server.cmp(&b.server));
+                return Ok(QueryResponse::CharacterList { servers });
+            };
+            candidates.retain(|(_, _, chars)| {
+                chars.iter().any(|c| c.character_id == character)
+                    || chars.len() < self.config.max_characters_per_server
             });
+            candidates.retain(|(_, pod, _)| !pod_draining(pod));
+            candidates.sort_by_key(|(_, pod, chars)| {
+                (
+                    std::cmp::Reverse(chars.iter().any(|c| c.character_id == character)),
+                    std::cmp::Reverse(
+                        chars
+                            .iter()
+                            .filter(|c| ids.contains(&c.character_id))
+                            .count(),
+                    ),
+                    chars.len(),
+                    pod.metadata.uid.clone(),
+                )
+            });
+            if !candidates.is_empty() {
+                break candidates;
+            }
+            let Some(demand_config) = &self.config.capacity_demand else {
+                return Ok(QueryResponse::Error {
+                    error: "No server available".into(),
+                });
+            };
+            let group = demand_config
+                .backend_groups
+                .get(&map)
+                .ok_or(DemandError::UnknownGroup)?;
+            let active = flight.get_or_insert_with(|| self.demand.signal(demand_config, group));
+            let snapshot = tokio::select! {
+                result = tokio::time::timeout_at(active.deadline, async {
+                    active.accepted.clone().await?;
+                    self.k8s_client
+                        .wait_for_pod_change(&endpoint.namespace, &labels, &version)
+                        .await?;
+                    self.k8s_client
+                        .query_resources_snapshot(
+                            &endpoint.namespace,
+                            mapping,
+                            status.as_ref(),
+                            Some(&labels),
+                            endpoint.annotation_selector.as_ref(),
+                        )
+                        .await
+                }) => result.map_err(|_| DemandError::Timeout)??,
+                _ = wait_for_disconnect(stream) => return Err(DemandError::Cancelled.into()),
+            };
+            resources = snapshot.0;
+            version = snapshot.1;
         };
+        let character = character.context("Missing character ID")?;
+        let (resource, pod, characters) = &candidates[0];
         let name = pod.metadata.name.as_deref().context("Missing Pod name")?;
         let (ip, ports) = if mapping.ports.is_some() {
             self.extract_multi_port_target_info(resource, mapping, &endpoint.namespace, name)
@@ -454,6 +506,16 @@ impl Clone for QueryServer {
             k8s_client: self.k8s_client.clone(),
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
+            demand: self.demand.clone(),
+        }
+    }
+}
+
+async fn wait_for_disconnect(stream: &mut TcpStream) {
+    let mut buffer = [0; 64];
+    while let Ok(size) = stream.read(&mut buffer).await {
+        if size == 0 {
+            break;
         }
     }
 }
