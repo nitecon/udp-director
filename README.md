@@ -160,8 +160,8 @@ See:
 Edit the chosen ConfigMap to customize for your environment.
 
 For demand-driven startup, configure optional `capacityDemand` with an internal
-HTTP controller endpoint, a map-to-backend-group mapping, and a bounded startup
-timeout. The director signals when an access query has no eligible capacity and
+HTTP controller endpoint and a bounded startup timeout. Map IDs pass through
+as backend groups by default; optional `backendGroups` entries override aliases. The director signals when an access query has no eligible capacity and
 watches Pods until normal Ready selection and label assignment can succeed.
 See [Capacity demand and cold starts](Docs/QueryAPI.md#capacity-demand-and-cold-starts)
 for callback responses, cancellation, always-on prerequisites, and the drain marker.

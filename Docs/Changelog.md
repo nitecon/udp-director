@@ -7,6 +7,15 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-10-06
+
+Pass unmapped map IDs to the capacity controller as backend groups. Alias mappings
+are optional and may be empty, so publishing new cold groups no longer requires a
+second director map list. Controller HTTP 404 determines unpublished groups.
+Add configuration, alias, pass-through and authoritative rejection coverage.
+Clarify that controllers must hold the generic drain marker on starting Pods until
+verified application readiness, even when Kubernetes already reports Ready.
+
 ## [3.1.0] - 2026-10-06
 
 Add optional aggregate capacity-demand signaling when a TCP access query finds

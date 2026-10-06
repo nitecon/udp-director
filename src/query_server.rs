@@ -265,10 +265,7 @@ impl QueryServer {
                     error: "No server available".into(),
                 });
             };
-            let group = demand_config
-                .backend_groups
-                .get(&map)
-                .ok_or(DemandError::UnknownGroup)?;
+            let group = demand_config.backend_groups.get(&map).unwrap_or(&map);
             let active = flight.get_or_insert_with(|| self.demand.signal(demand_config, group));
             let snapshot = tokio::select! {
                 result = tokio::time::timeout_at(active.deadline, async {

@@ -85,7 +85,8 @@ restores `Used` and clears the timestamp. Proxy inactivity never changes occupan
 
 ## Capacity demand and cold starts
 
-Available in director version 3.1.0 and later.
+Capacity demand is available in director version 3.1.0 and later. Automatic map
+pass-through and optional aliases require version 3.1.1 or later.
 
 By default, an access query with no eligible server returns `No server available`.
 Operators can enable aggregate demand signaling:
@@ -94,24 +95,31 @@ Operators can enable aggregate demand signaling:
 capacityDemand:
   endpoint: http://capacity-controller.control.svc:8080/v1alpha1/demand
   bootTimeoutSeconds: 300
-  backendGroups:
-    tutorial: example-backend
+  backendGroups: {}  # Optional aliases; can also be omitted.
 ```
 
-`backendGroups` maps client map IDs to controller-owned capacity groups. These
-values and the internal HTTP endpoint are director configuration, never client
-fields. A configured entry identifies a published cold map even when it has no
-Pods. An unmapped map can still use existing eligible Pods; if it has no capacity,
-it returns `Unknown backend group` without signaling. Map/group IDs use the same
-1–63 character format as map IDs. The timeout must be positive and defaults to
-300 seconds. Capacity demand requires a core Pod mapping.
+When no eligible capacity exists, the requested map ID is sent as `backendGroup`
+by default. The controller's HTTP 404 is the authoritative unpublished/unknown
+response, so newly published cold maps need no director allowlist or configuration
+update. Optional `backendGroups` entries override individual map IDs with aliases:
+
+```yaml
+backendGroups:
+  tutorial: example-backend
+```
+
+Both `backendGroups: {}` and omitting `backendGroups` enable default pass-through.
+Aliases and the internal HTTP endpoint are director configuration, never client
+fields. Map/group IDs use the same 1–63 character format as map IDs. The timeout
+must be positive and defaults to 300 seconds. Capacity demand requires a core Pod
+mapping.
 
 Only a valid access `query` with no eligible capacity triggers the callback;
 `characterList`, ready access, and UDP traffic do not trigger it. The director
 sends one HTTP POST with `Content-Type: application/json`:
 
 ```json
-{"backendGroup":"example-backend"}
+{"backendGroup":"tutorial"}
 ```
 
 The configured endpoint includes its path. No player identity, assignment,
@@ -163,6 +171,14 @@ The generic Pod label `udp-director.io/draining: "true"` excludes the Pod from
 access assignment, including reconnect queries. It does not stop existing UDP
 forwarding or hide its occupants from `characterList`. Removing the marker makes
 the Pod eligible again if it meets the other readiness/capacity rules.
+
+Native Pod Ready can precede application/server-process readiness. The controller
+must create starting Pods with this drain marker already set and retain it until
+verified application readiness, then clear it. The director watches that label
+change and applies its normal Ready/capacity checks. Application readiness reports
+and their transport remain controller-owned; the director requires no private
+report protocol or dependencies. This startup gate uses the same generic marker
+as idle draining.
 
 The controller must mark a candidate draining using its current resource version,
 then re-read the Pod's character labels and authoritative occupancy before

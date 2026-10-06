@@ -12,8 +12,8 @@ disconnectAnnotation: udp-director.io/disconnected-at
 # capacityDemand:
 #   endpoint: http://capacity-controller.control.svc:8080/v1alpha1/demand
 #   bootTimeoutSeconds: 300
-#   backendGroups:
-#     tutorial: example-backend
+#   backendGroups: {}  # Optional aliases; omitted also passes map IDs through.
+#   # To override an alias instead: backendGroups: {tutorial: example-backend}
 
 defaultEndpoint:
   resourceType: pod

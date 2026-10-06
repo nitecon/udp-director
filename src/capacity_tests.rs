@@ -23,6 +23,7 @@ use crate::{
 struct State {
     pod: Option<Value>,
     demands: usize,
+    groups: Vec<String>,
     watches: usize,
     patches: usize,
     status: StatusCode,
@@ -62,6 +63,7 @@ impl Fixture {
         let state = Arc::new(Mutex::new(State {
             pod,
             demands: 0,
+            groups: Vec::new(),
             watches: 0,
             patches: 0,
             status: StatusCode::ACCEPTED,
@@ -161,12 +163,12 @@ async fn handle(
     let body = request.into_body().collect().await.unwrap().to_bytes();
     let (status, value) = if uri.path() == "/v1alpha1/demand" {
         assert_eq!(method, hyper::Method::POST);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap(),
-            json!({"backendGroup":"example-backend"})
-        );
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 1);
+        let group = body["backendGroup"].as_str().unwrap().to_owned();
         let mut state = state.lock().await;
         state.demands += 1;
+        state.groups.push(group);
         if state.ready_on_demand {
             changed.send_modify(|v| *v += 1);
             let mut ready = pod(true, false);
@@ -289,6 +291,7 @@ async fn concurrent_cold_queries_signal_once_wait_for_ready_and_assign() {
     let second = fixture.query(access("tutorial", "second")).await;
     fixture.wait_for(|s| s.watches == 2).await;
     assert_eq!(fixture.state.lock().await.demands, 1);
+    assert_eq!(fixture.state.lock().await.groups, ["example-backend"]);
     fixture.set_pod(pod(false, false)).await;
     fixture.wait_for(|s| s.watches >= 4).await;
     assert_eq!(fixture.state.lock().await.patches, 0);
@@ -333,7 +336,7 @@ async fn disconnected_cold_query_is_cancelled_and_later_demand_can_signal() {
 }
 
 #[tokio::test]
-async fn draining_pod_excluded_until_marker_clears() {
+async fn native_ready_pod_waits_for_controller_to_clear_process_readiness_gate() {
     let fixture = Fixture::new(Some(pod(true, true)), 5).await;
     let query = fixture.query(access("tutorial", "joining")).await;
     fixture.wait_for(|s| s.watches == 1).await;
@@ -355,13 +358,25 @@ async fn concurrent_drain_patch_conflict_never_installs_route() {
 }
 
 #[tokio::test]
-async fn unknown_cold_map_and_character_lookup_do_not_signal() {
+async fn controller_rejects_unpublished_passthrough_group() {
     let fixture = Fixture::new(None, 5).await;
+    fixture.state.lock().await.status = StatusCode::NOT_FOUND;
     let query = fixture.query(access("unpublished", "joining")).await;
     assert_eq!(
         response(query.0, query.1).await["error"],
         "Unknown backend group"
     );
+    let state = fixture.state.lock().await;
+    assert_eq!(state.groups, ["unpublished"]);
+    assert_eq!(state.demands, 1);
+    assert_eq!(state.watches, 0);
+    assert_eq!(state.patches, 0);
+    assert_eq!(fixture.sessions.count(), 0);
+}
+
+#[tokio::test]
+async fn character_lookup_does_not_signal() {
+    let fixture = Fixture::new(None, 5).await;
     let query = fixture
         .query(QueryRequest::CharacterList {
             map: "tutorial".into(),
@@ -370,6 +385,28 @@ async fn unknown_cold_map_and_character_lookup_do_not_signal() {
         .await;
     assert_eq!(response(query.0, query.1).await, json!({"servers":[]}));
     assert_eq!(fixture.state.lock().await.demands, 0);
+}
+
+#[tokio::test]
+async fn cold_map_passes_through_with_empty_aliases_and_waits_for_ready() {
+    let fixture = Fixture::configured(None, 5, |config| {
+        config
+            .capacity_demand
+            .as_mut()
+            .unwrap()
+            .backend_groups
+            .clear();
+    })
+    .await;
+    let query = fixture.query(access("tutorial", "joining")).await;
+    fixture.wait_for(|s| s.watches == 1).await;
+    assert_eq!(fixture.state.lock().await.groups, ["tutorial"]);
+    assert_eq!(fixture.state.lock().await.patches, 0);
+    fixture.set_pod(pod(true, false)).await;
+    assert_eq!(response(query.0, query.1).await["status"], "Allocated");
+    let state = fixture.state.lock().await;
+    assert_eq!(state.demands, 1);
+    assert_eq!(state.patches, 1);
 }
 
 #[tokio::test]

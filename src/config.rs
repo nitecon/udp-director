@@ -95,7 +95,8 @@ fn default_disconnect_annotation() -> String {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CapacityDemandConfig {
     pub endpoint: String,
-    /// Client map ID -> controller-owned aggregate backend group.
+    /// Optional map aliases; unmapped IDs pass through to the controller.
+    #[serde(default)]
     pub backend_groups: HashMap<String, String>,
     #[serde(default = "default_boot_timeout")]
     pub boot_timeout_seconds: u64,
@@ -256,10 +257,6 @@ impl Config {
                 demand.boot_timeout_seconds > 0,
                 "bootTimeoutSeconds must be non-zero"
             );
-            anyhow::ensure!(
-                !demand.backend_groups.is_empty(),
-                "backendGroups must not be empty"
-            );
             for (map, group) in &demand.backend_groups {
                 anyhow::ensure!(
                     crate::characters::valid_character_id(map)
@@ -322,6 +319,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capacity_demand_accepts_omitted_empty_and_explicit_aliases() {
+        let base: Config = serde_yaml::from_str(include_str!("../config.example.yaml")).unwrap();
+        for aliases in [
+            None,
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"tutorial":"example-backend"})),
+        ] {
+            let expected = aliases
+                .as_ref()
+                .and_then(|a| a["tutorial"].as_str())
+                .map(str::to_owned);
+            let mut value = serde_json::to_value(&base).unwrap();
+            value["capacityDemand"] =
+                serde_json::json!({"endpoint":"http://controller:8080/v1alpha1/demand"});
+            if let Some(aliases) = aliases {
+                value["capacityDemand"]["backendGroups"] = aliases;
+            }
+            let config: Config =
+                serde_yaml::from_str(&serde_yaml::to_string(&value).unwrap()).unwrap();
+            config.validate().unwrap();
+            let demand = config.capacity_demand.unwrap();
+            assert_eq!(demand.boot_timeout_seconds, 300);
+            assert_eq!(demand.backend_groups.get("tutorial"), expected.as_ref());
+        }
+    }
 
     #[test]
     fn test_default_endpoint_config() {
