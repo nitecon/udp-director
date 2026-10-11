@@ -7,6 +7,14 @@ All notable changes to the UDP Director project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] - 2026-10-11
+
+Serialize local access selection and label writes using fresh Pod snapshots so
+players waiting for the same starting server can all receive assignments when
+capacity becomes ready. Release the assignment lock during startup waits.
+Add regressions for concurrent cold joins, later arrivals during Pending and
+application readiness, and capacity limits without duplicate demand signals.
+
 ## [3.1.1] - 2026-10-06
 
 Pass unmapped map IDs to the capacity controller as backend groups. Alias mappings

@@ -22,6 +22,13 @@ occupancy behavior.
 Capacity exhaustion and resource-version conflicts return errors without installing
 a route.
 
+Cold-start tests use real TCP queries with mock demand and Kubernetes endpoints.
+They require concurrent and later-arriving players to share one demand signal
+through Pending and application-readiness gating, then both receive `Allocated`
+on the same Pod with both labels present. Queued assignments also respect the new
+server's capacity. The fixtures do not create real servers or validate controller
+replica counts.
+
 Character tests cover valid label names, the three character states, requested
 ID filtering, and the 120-second disconnect visibility boundary. Query tests
 cover fragmented character lists larger than one TCP read, incomplete JSON, and

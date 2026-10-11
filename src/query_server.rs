@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
 use crate::characters::{CharacterServer, characters_on_pod, valid_character_id};
@@ -58,6 +59,7 @@ pub struct QueryServer {
     session_manager: SessionManager,
     config: Config,
     demand: CapacityDemand,
+    assignments: Arc<Mutex<()>>,
 }
 
 impl QueryServer {
@@ -74,6 +76,7 @@ impl QueryServer {
             session_manager,
             config,
             demand: CapacityDemand::default(),
+            assignments: Arc::new(Mutex::new(())),
         }
     }
 
@@ -203,16 +206,22 @@ impl QueryServer {
             json_path: s.json_path.clone(),
             expected_values: s.expected_values.clone(),
         });
-        let (mut resources, mut version) = self
-            .k8s_client
-            .query_resources_snapshot(
+        let read_snapshot = || {
+            self.k8s_client.query_resources_snapshot(
                 &endpoint.namespace,
                 mapping,
                 status.as_ref(),
                 Some(&labels),
                 endpoint.annotation_selector.as_ref(),
             )
-            .await?;
+        };
+        // Serialize local selection and label writes using a fresh Pod snapshot.
+        let mut assignment_guard = if character.is_some() {
+            Some(self.assignments.lock().await)
+        } else {
+            None
+        };
+        let (mut resources, mut version) = read_snapshot().await?;
         let mut flight = None;
         let candidates = loop {
             let now = time::OffsetDateTime::now_utc();
@@ -260,6 +269,8 @@ impl QueryServer {
             if !candidates.is_empty() {
                 break candidates;
             }
+            // Startup waits must not block other assignments.
+            drop(assignment_guard.take());
             let Some(demand_config) = &self.config.capacity_demand else {
                 return Ok(QueryResponse::Error {
                     error: "No server available".into(),
@@ -267,24 +278,19 @@ impl QueryServer {
             };
             let group = demand_config.backend_groups.get(&map).unwrap_or(&map);
             let active = flight.get_or_insert_with(|| self.demand.signal(demand_config, group));
-            let snapshot = tokio::select! {
+            let (guard, snapshot) = tokio::select! {
                 result = tokio::time::timeout_at(active.deadline, async {
                     active.accepted.clone().await?;
                     self.k8s_client
                         .wait_for_pod_change(&endpoint.namespace, &labels, &version)
                         .await?;
-                    self.k8s_client
-                        .query_resources_snapshot(
-                            &endpoint.namespace,
-                            mapping,
-                            status.as_ref(),
-                            Some(&labels),
-                            endpoint.annotation_selector.as_ref(),
-                        )
-                        .await
+                    let guard = self.assignments.lock().await;
+                    let snapshot = read_snapshot().await?;
+                    Ok::<_, anyhow::Error>((guard, snapshot))
                 }) => result.map_err(|_| DemandError::Timeout)??,
                 _ = wait_for_disconnect(stream) => return Err(DemandError::Cancelled.into()),
             };
+            assignment_guard = Some(guard);
             resources = snapshot.0;
             version = snapshot.1;
         };
@@ -504,6 +510,7 @@ impl Clone for QueryServer {
             session_manager: self.session_manager.clone(),
             config: self.config.clone(),
             demand: self.demand.clone(),
+            assignments: self.assignments.clone(),
         }
     }
 }

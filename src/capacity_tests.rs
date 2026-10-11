@@ -297,12 +297,90 @@ async fn concurrent_cold_queries_signal_once_wait_for_ready_and_assign() {
     assert_eq!(fixture.state.lock().await.patches, 0);
     fixture.set_pod(pod(true, false)).await;
     let results = tokio::join!(response(first.0, first.1), response(second.0, second.1));
-    // Resource-version conflicts fail safely; a successful query has a real label.
-    assert!(results.0["status"] == "Allocated" || results.1["status"] == "Allocated");
     for result in [results.0, results.1] {
-        assert!(result["status"] == "Allocated" || result["error"] == "Unable to establish route");
+        assert_eq!(result["status"], "Allocated", "{result}");
+        assert_eq!(result["server"], "opaque-example");
     }
-    assert_eq!(fixture.state.lock().await.demands, 1);
+    let state = fixture.state.lock().await;
+    assert_eq!(state.demands, 1);
+    let labels = &state.pod.as_ref().unwrap()["metadata"]["labels"];
+    assert_eq!(labels["characters.udp-director.io/first"], "Allocated");
+    assert_eq!(labels["characters.udp-director.io/second"], "Allocated");
+}
+
+#[tokio::test]
+async fn player_arriving_during_startup_shares_pending_server() {
+    let fixture = Fixture::new(None, 5).await;
+    let first = fixture.query(access("tutorial", "first")).await;
+    fixture.wait_for(|s| s.watches == 1).await;
+    let mut pending = pod(false, true);
+    pending["status"]["phase"] = json!("Pending");
+    pending["status"].as_object_mut().unwrap().remove("podIP");
+    fixture.set_pod(pending).await;
+    fixture.wait_for(|s| s.watches == 2).await;
+    let second = fixture.query(access("tutorial", "second")).await;
+    fixture.wait_for(|s| s.watches == 3).await;
+    fixture.set_pod(pod(true, true)).await;
+    fixture.wait_for(|s| s.watches == 5).await;
+    {
+        let state = fixture.state.lock().await;
+        assert_eq!(state.demands, 1);
+        assert_eq!(state.patches, 0);
+        assert_eq!(fixture.sessions.count(), 0);
+    }
+    fixture.set_pod(pod(true, false)).await;
+    let results = tokio::join!(response(first.0, first.1), response(second.0, second.1));
+    for result in [results.0, results.1] {
+        assert_eq!(result["status"], "Allocated", "{result}");
+        assert_eq!(result["server"], "opaque-example");
+    }
+    let state = fixture.state.lock().await;
+    assert_eq!(state.demands, 1);
+    assert_eq!(state.patches, 2);
+    let labels = &state.pod.as_ref().unwrap()["metadata"]["labels"];
+    assert_eq!(labels["characters.udp-director.io/first"], "Allocated");
+    assert_eq!(labels["characters.udp-director.io/second"], "Allocated");
+}
+
+#[tokio::test]
+async fn queued_startup_assignments_respect_new_server_capacity() {
+    let fixture = Fixture::configured(None, 1, |config| {
+        config.max_characters_per_server = 1;
+    })
+    .await;
+    let first = fixture.query(access("tutorial", "first")).await;
+    let second = fixture.query(access("tutorial", "second")).await;
+    fixture.wait_for(|s| s.watches == 2).await;
+    fixture.set_pod(pod(true, false)).await;
+    let results = tokio::join!(response(first.0, first.1), response(second.0, second.1));
+    let replies = [results.0, results.1];
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|r| r["status"] == "Allocated")
+            .count(),
+        1
+    );
+    assert_eq!(
+        replies
+            .iter()
+            .filter(|r| r["error"] == "Server startup timed out")
+            .count(),
+        1
+    );
+    let state = fixture.state.lock().await;
+    assert_eq!(state.demands, 1);
+    assert_eq!(state.patches, 1);
+    let labels = state.pod.as_ref().unwrap()["metadata"]["labels"]
+        .as_object()
+        .unwrap();
+    assert_eq!(
+        labels
+            .keys()
+            .filter(|k| k.starts_with("characters.udp-director.io/"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

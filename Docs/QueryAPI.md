@@ -73,7 +73,9 @@ repeated access queries. Character lookup can still show their occupants.
 Each assignment uses one label under `characterLabelPrefix` (default
 `characters.udp-director.io`): `<prefix>/<characterId>: Allocated`. The director
 patches this label using the Pod resource version before installing forwarding;
-a concurrent update fails the request instead of overwriting the newer state.
+selection and label writes are serialized within one director process, with a
+fresh Pod list for each assignment. An update from another director or the
+controller can still fail the request instead of overwriting the newer state.
 The service account requires Pod get/list/watch/patch permissions.
 
 The occupancy controller changes the label to `Used` on actual connection and
@@ -135,8 +137,11 @@ Its status code determines the next step:
 | Other status or transport failure | Return `Capacity demand unavailable`. |
 
 Concurrent cold queries for the same group share one POST and the startup
-deadline **within one director process**. Each query keeps its normal independent
-character selection and label assignment. Separate director replicas can each
+deadline **within one director process**, including queries arriving while a Pod
+is Pending or waiting for application readiness. Once capacity is ready, each
+query selects and writes its character label in turn, using the updated capacity
+from preceding assignments. No character label or route is installed on a
+starting Pod. Separate director replicas can each
 send a POST; the controller must treat repeated aggregate signals idempotently.
 There are no callback retries or durable request records. Once all waiting
 queries finish or disconnect, a later query may signal the group again.
