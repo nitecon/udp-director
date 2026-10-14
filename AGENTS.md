@@ -136,3 +136,15 @@ names, resource mappings, and label keys are deployment internals and must never
 be required in client requests. Keep them in director configuration. Return an
 opaque server identifier and connection status. Do not restore the raw Kubernetes
 query interface as a compatibility path.
+
+## API documentation
+
+Start with [Docs/API-Docs/README.md](Docs/API-Docs/README.md) before API work.
+[Docs/API-Docs/QueryAPI.md](Docs/API-Docs/QueryAPI.md) contains the TCP query and
+connection contract, Pod labels and occupancy lifecycle, capacity-demand HTTP
+callback, readiness/draining rules, and current network limitations.
+
+API documentation is maintained as repository Markdown under `Docs/API-Docs/`.
+Read and update those files directly alongside API changes; do not rely on
+`.agent/api` artifacts or gateway-backed docs lookup or publishing. This
+architecture law takes precedence over API documentation and historical context.

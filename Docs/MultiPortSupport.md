@@ -2,7 +2,7 @@
 
 One TCP server query installs the selected backend's configured port mappings.
 Clients then send application traffic directly to the regional director's data
-ports. See [Query API](QueryAPI.md) for request and response details and the
+ports. See [Query API](API-Docs/QueryAPI.md) for request and response details and the
 current connection identity limitation.
 
 ## Configuration

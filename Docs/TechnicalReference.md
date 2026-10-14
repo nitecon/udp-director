@@ -12,7 +12,7 @@ This document provides in-depth technical details for developers and operators w
 
 ## Query and routing
 
-[Query API](QueryAPI.md) defines the TCP JSON contract, character lookup, Pod
+[Query API](API-Docs/QueryAPI.md) defines the TCP JSON contract, character lookup, Pod
 metadata, and unresolved integration boundaries. A successful query installs a
 forwarding route and returns `Allocated` with public director ports. Application
 traffic then goes directly through those ports without a control datagram.

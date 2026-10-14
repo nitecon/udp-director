@@ -277,7 +277,7 @@ A successful response identifies the server and public director port:
 ```
 
 Send application datagrams directly to that director's UDP port. See
-[Query API](QueryAPI.md) for character lookup, framing, and the current
+[Query API](API-Docs/QueryAPI.md) for character lookup, framing, and the current
 connection identity limitation. No routing token or setup packet is required.
 
 ## Troubleshooting

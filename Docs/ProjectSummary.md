@@ -50,7 +50,7 @@ remains documented; live controller occupancy integration is separate.
 
 ## References
 
-- [TCP Query and Connection API](QueryAPI.md)
+- [TCP Query and Connection API](API-Docs/QueryAPI.md)
 - [Minimal Pod configuration](../config.example.yaml)
 - [Client example](../examples/client_example.rs)
 - [Multi-port configuration](MultiPortSupport.md)

@@ -1,7 +1,7 @@
 # Testing Guide for UDP Director
 
 Verification focuses on TCP query, Kubernetes label matching, and UDP forwarding.
-See [Query API](QueryAPI.md) for the request contract and unresolved integration
+See [Query API](API-Docs/QueryAPI.md) for the request contract and unresolved integration
 boundaries.
 
 ## Local checks
@@ -66,7 +66,7 @@ cargo run --example client_example
 
 ## Character lookup
 
-Apply the metadata representation documented in [Query API](QueryAPI.md) to a
+Apply the metadata representation documented in [Query API](API-Docs/QueryAPI.md) to a
 Ready Pod, then send:
 
 ```json

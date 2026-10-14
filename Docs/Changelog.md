@@ -34,7 +34,7 @@ selection, resource-version-guarded label assignment, and UDP forwarding.
 
 Pods labeled `udp-director.io/draining: "true"` are excluded from access selection.
 Controller response codes, drain races, and always-on prerequisites are documented
-in [Query API](QueryAPI.md). Occupancy remains driven by actual server events.
+in [Query API](API-Docs/QueryAPI.md). Occupancy remains driven by actual server events.
 
 ## [3.0.0] - 2026-09-07
 
@@ -51,7 +51,7 @@ Internal and product-specific dependencies are being removed from this public
 open-source project. The routing ticket cache, reservation-controller interface,
 and UDP token/reset exchange are removed in favor of TCP query followed by UDP
 forwarding. Character-list lookup reads native Pod labels and disconnect
-metadata. See [Query API](QueryAPI.md) for the current recovery contract and its
+metadata. See [Query API](API-Docs/QueryAPI.md) for the current recovery contract and its
 remaining integration decisions.
 
 Older release entries below describe historical behavior, not the current API.

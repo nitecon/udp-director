@@ -44,7 +44,7 @@ make k8s-delete
 
 ## API and configuration
 
-See [Query API](QueryAPI.md) for TCP request framing, `query`, `characterList`,
+See [Query API](API-Docs/QueryAPI.md) for TCP request framing, `query`, `characterList`,
 Pod character labels, and the current shared-NAT limitation. Use
 [config.example.yaml](../config.example.yaml) for the minimal Pod configuration.
 

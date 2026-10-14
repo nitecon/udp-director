@@ -1,7 +1,7 @@
 # Operator Annotation Filtering
 
 Annotation selectors are director configuration, never client request fields.
-Clients use [map and character requests](QueryAPI.md).
+Clients use [map and character requests](API-Docs/QueryAPI.md).
 
 Operators may set `defaultEndpoint.annotationSelector` to an exact-match string
 map. The director applies it after Kubernetes label filtering. Keep workload
@@ -19,4 +19,4 @@ defaultEndpoint:
 
 The deployment must maintain these annotations. Character occupancy uses the
 separate per-character labels and disconnect timestamp contract in
-[Query API](QueryAPI.md). No client supplies Kubernetes selectors.
+[Query API](API-Docs/QueryAPI.md). No client supplies Kubernetes selectors.

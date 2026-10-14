@@ -9,6 +9,7 @@ A Kubernetes-native UDP/TCP proxy. Query a server over TCP using Pod labels, the
 
 ## Quick Links
 
+- **[API Documentation](Docs/API-Docs/README.md)** - Repository API contracts and guidance for agents
 - **[Load Balancing](Docs/load-balancing.md)** - Load balancing strategies and configuration
 - **[Annotation Support](Docs/AnnotationSupport.md)** - Filter by labels and annotations (best practices)
 - **[Technical Reference](Docs/TechnicalReference.md)** - Complete deployment and technical guide
@@ -19,7 +20,7 @@ A Kubernetes-native UDP/TCP proxy. Query a server over TCP using Pod labels, the
 - **[Testing Guide](Docs/Testing.md)** - Unit, integration, and load testing
 - **[Quick Reference](Docs/QuickReference.md)** - Commands and API reference
 - **[Project Summary](Docs/ProjectSummary.md)** - Implementation status
-- **[Query and Connection API](Docs/QueryAPI.md)** - TCP queries, character lookup, and UDP routing
+- **[Query and Connection API](Docs/API-Docs/QueryAPI.md)** - TCP queries, character lookup, and UDP routing
 - **[Changelog](Docs/Changelog.md)** - Version history
 
 ## What Problem Does This Solve?
@@ -45,7 +46,7 @@ Traditional UDP load balancers are stateless and can't intelligently route clien
 4. Use TCP character-list queries to find servers containing friends. Character status lives on Pod labels; actual server connection events drive occupancy.
 
 No routing ticket, token redemption, or UDP setup exchange is required.
-See [Query and Connection API](Docs/QueryAPI.md) for the wire format and routing constraints.
+See [Query and Connection API](Docs/API-Docs/QueryAPI.md) for the wire format and routing constraints.
 
 ## Quick Start
 
@@ -112,7 +113,7 @@ printf '%s\n' '{"type":"query","map":"tutorial","characterId":"me","friendIds":[
 printf 'gameplay' | nc -u <regional-director> 7777
 ```
 
-See [Query and Connection API](Docs/QueryAPI.md) and the [Rust client example](examples/client_example.rs).
+See [Query and Connection API](Docs/API-Docs/QueryAPI.md) and the [Rust client example](examples/client_example.rs).
 
 ## Architecture
 
@@ -163,7 +164,7 @@ For demand-driven startup, configure optional `capacityDemand` with an internal
 HTTP controller endpoint and a bounded startup timeout. Map IDs pass through
 as backend groups by default; optional `backendGroups` entries override aliases. The director signals when an access query has no eligible capacity and
 watches Pods until normal Ready selection and label assignment can succeed.
-See [Capacity demand and cold starts](Docs/QueryAPI.md#capacity-demand-and-cold-starts)
+See [Capacity demand and cold starts](Docs/API-Docs/QueryAPI.md#capacity-demand-and-cold-starts)
 for callback responses, cancellation, always-on prerequisites, and the drain marker.
 
 ## Performance
